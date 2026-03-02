@@ -8,6 +8,7 @@ const cors = require('cors');
 const morgan = require('morgan');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const { getJwtSecret } = require('./config/env');
 const logger = require('./utils/logger');
 const { errorHandler } = require('./middleware/errorHandler');
 
@@ -71,13 +72,25 @@ if (fs.existsSync(portalsPath)) {
   });
 }
 
+// Escape for safe HTML (prevents XSS from query params)
+function escapeHtml(s) {
+  if (typeof s !== 'string') return '';
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Instagram OAuth callback - serves a simple page the mobile WebView intercepts
 app.get('/auth/instagram/callback', (req, res) => {
-  const code = req.query.code || '';
-  const error = req.query.error || '';
+  const code = escapeHtml(String(req.query.code || '').slice(0, 512));
+  const error = escapeHtml(String(req.query.error || '').slice(0, 256));
+  const message = code ? 'Linking your account...' : 'Authorization failed: ' + (error || 'Unknown error');
   res.send(`<!DOCTYPE html><html><body>
     <h2>Instagram Authorization</h2>
-    <p>${code ? 'Linking your account...' : 'Authorization failed: ' + error}</p>
+    <p>${message}</p>
     <script>window.close();</script>
   </body></html>`);
 });
@@ -91,6 +104,9 @@ app.get('/api', (req, res) => {
       health: '/health',
       auth: '/api/v1/auth',
       users: '/api/v1/users',
+      feedback: '/api/v1/feedback',
+      reports: '/api/v1/reports',
+      referrals: '/api/v1/referrals',
       restaurants: '/api/v1/restaurants',
       checkins: '/api/v1/checkins',
       matches: '/api/v1/matches',
@@ -107,6 +123,7 @@ app.get('/api', (req, res) => {
       challenges: '/api/v1/challenges',
       recommendations: '/api/v1/recommendations',
       rewards: '/api/v1/rewards',
+      aiCompanion: '/api/v1/ai-companion',
     },
   });
 });
@@ -114,6 +131,9 @@ app.get('/api', (req, res) => {
 // Route imports
 const authRoutes = require('./routes/auth.routes');
 const userRoutes = require('./routes/user.routes');
+const feedbackRoutes = require('./routes/feedback.routes');
+const reportRoutes = require('./routes/report.routes');
+const referralRoutes = require('./routes/referral.routes');
 const restaurantRoutes = require('./routes/restaurant.routes');
 const checkinRoutes = require('./routes/checkin.routes');
 const matchRoutes = require('./routes/match.routes');
@@ -139,10 +159,15 @@ const tableAlertsRoutes = require('./routes/tableAlerts.routes');
 const diningListsRoutes = require('./routes/diningLists.routes');
 const dinnerInvitationsRoutes = require('./routes/dinnerInvitations.routes');
 const tableMatchmakerRoutes = require('./routes/tableMatchmaker.routes');
+const feedRoutes = require('./routes/feed.routes');
+const aiCompanionRoutes = require('./routes/aiCompanion.routes');
 
 // Register routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', userRoutes);
+app.use('/api/v1/feedback', feedbackRoutes);
+app.use('/api/v1/reports', reportRoutes);
+app.use('/api/v1/referrals', referralRoutes);
 app.use('/api/v1/restaurants', restaurantRoutes);
 app.use('/api/v1/checkins', checkinRoutes);
 app.use('/api/v1/matches', matchRoutes);
@@ -163,6 +188,8 @@ app.use('/api/v1/table-alerts', tableAlertsRoutes);
 app.use('/api/v1/dining-lists', diningListsRoutes);
 app.use('/api/v1/dinner-invitations', dinnerInvitationsRoutes);
 app.use('/api/v1/table-matchmaker', tableMatchmakerRoutes);
+app.use('/api/v1/feed', feedRoutes);
+app.use('/api/v1/ai-companion', aiCompanionRoutes);
 
 app.use(errorHandler);
 
@@ -177,7 +204,7 @@ io.use((socket, next) => {
     return next(new Error('Authentication required'));
   }
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret-key');
+    const decoded = jwt.verify(token, getJwtSecret());
     socket.userId = decoded.userId;
     next();
   } catch (err) {
@@ -339,6 +366,13 @@ try {
 } catch (_) {
   console.warn('   ⚠️  reservationReminderJob not found – skipping reminder job');
 }
+let runEventListNotifications = null;
+try {
+  const eventListJob = require('./services/eventListNotificationJob');
+  runEventListNotifications = eventListJob.runEventListNotifications;
+} catch (_) {
+  console.warn('   ⚠️  eventListNotificationJob not found – skipping event-at-list notifications');
+}
 
 const ensureReservationSlotsOnStartup = async () => {
   if (!ensureReservationSlots) return;
@@ -364,7 +398,20 @@ const runReservationRemindersOnStartup = async () => {
   }
 };
 
+const runEventListNotificationsOnStartup = async () => {
+  if (!runEventListNotifications) return;
+  try {
+    const result = await runEventListNotifications();
+    if (result.sent > 0) {
+      console.log(`   📅 Event-at-list notifications sent: ${result.sent}`);
+    }
+  } catch (err) {
+    console.warn('   ⚠️  Event list notification job failed:', err.message);
+  }
+};
+
 const RESERVATION_REMINDER_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const EVENT_LIST_NOTIFICATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
@@ -374,6 +421,8 @@ server.listen(PORT, async () => {
   await ensureReservationSlotsOnStartup();
   await runReservationRemindersOnStartup();
   setInterval(runReservationRemindersOnStartup, RESERVATION_REMINDER_INTERVAL_MS);
+  await runEventListNotificationsOnStartup();
+  setInterval(runEventListNotificationsOnStartup, EVENT_LIST_NOTIFICATION_INTERVAL_MS);
   console.log(`\n🍽️  TableShare API Running!`);
   console.log(`📍 http://localhost:${PORT}`);
   console.log(`🔌 Socket.IO ready`);
