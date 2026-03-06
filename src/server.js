@@ -1,7 +1,9 @@
-require('dotenv').config({ path: '.env.local' });
+const path = require('path');
+const backendRoot = path.join(__dirname, '..');
+require('dotenv').config({ path: path.join(backendRoot, '.env') });
+require('dotenv').config({ path: path.join(backendRoot, '.env.local') });
 const express = require('express');
 const http = require('http');
-const path = require('path');
 const fs = require('fs');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -30,7 +32,31 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: false,
 }));
-app.use(cors());
+// CORS: allow portal domains (credentials required for auth)
+const allowedOrigins = [
+  'https://admin.tableshare.ai',
+  'https://partner.tableshare.ai',
+  'https://partners.tableshare.ai',
+  'https://tableshare.pixelcheese.com',
+  'https://www.tableshare.ai',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+];
+app.use(cors({
+  origin: (origin, cb) => {
+    // Allow requests with no origin (e.g. Postman, server-to-server) or from allowed list
+    if (!origin || allowedOrigins.includes(origin)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(express.json());
 app.use(morgan('dev'));
 
@@ -124,6 +150,7 @@ app.get('/api', (req, res) => {
       recommendations: '/api/v1/recommendations',
       rewards: '/api/v1/rewards',
       aiCompanion: '/api/v1/ai-companion',
+      webhooks: '/api/v1/webhooks (e.g. /revenuecat)',
     },
   });
 });
@@ -161,6 +188,7 @@ const dinnerInvitationsRoutes = require('./routes/dinnerInvitations.routes');
 const tableMatchmakerRoutes = require('./routes/tableMatchmaker.routes');
 const feedRoutes = require('./routes/feed.routes');
 const aiCompanionRoutes = require('./routes/aiCompanion.routes');
+const webhooksRevenueCatRoutes = require('./routes/webhooks.revenuecat.routes');
 
 // Register routes
 app.use('/api/v1/auth', authRoutes);
@@ -190,6 +218,7 @@ app.use('/api/v1/dinner-invitations', dinnerInvitationsRoutes);
 app.use('/api/v1/table-matchmaker', tableMatchmakerRoutes);
 app.use('/api/v1/feed', feedRoutes);
 app.use('/api/v1/ai-companion', aiCompanionRoutes);
+app.use('/api/v1/webhooks/revenuecat', webhooksRevenueCatRoutes);
 
 app.use(errorHandler);
 
@@ -360,9 +389,11 @@ try {
 } catch (_) {
   console.warn('   ⚠️  reservationSlotService not found – skipping slot setup');
 }
+let runGroupEventReminders = null;
 try {
   const reminderJob = require('./services/reservationReminderJob');
   runReservationReminders = reminderJob.runReservationReminders;
+  runGroupEventReminders = reminderJob.runGroupEventReminders;
 } catch (_) {
   console.warn('   ⚠️  reservationReminderJob not found – skipping reminder job');
 }
@@ -387,14 +418,21 @@ const ensureReservationSlotsOnStartup = async () => {
 };
 
 const runReservationRemindersOnStartup = async () => {
-  if (!runReservationReminders) return;
   try {
-    const result = await runReservationReminders();
-    if (result.reminded24h > 0 || result.reminded1h > 0) {
-      console.log(`   🔔 Reservation reminders sent: 24h=${result.reminded24h}, 1h=${result.reminded1h}`);
+    if (runReservationReminders) {
+      const result = await runReservationReminders();
+      if (result.reminded24h > 0 || result.reminded1h > 0) {
+        console.log(`   🔔 Reservation reminders sent: 24h=${result.reminded24h}, 1h=${result.reminded1h}`);
+      }
+    }
+    if (runGroupEventReminders) {
+      const gr = await runGroupEventReminders();
+      if (gr.groupEventReminders > 0) {
+        console.log(`   🔔 Group dinner reminders sent: ${gr.groupEventReminders}`);
+      }
     }
   } catch (err) {
-    console.warn('   ⚠️  Reservation reminder job failed:', err.message);
+    console.warn('   ⚠️  Reminder job failed:', err.message);
   }
 };
 

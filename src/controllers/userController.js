@@ -12,6 +12,9 @@ const getMyProfile = asyncHandler(async (req, res) => {
       is_photo_verified, verification_status, verified_at,
       role, is_admin, restaurant_id,
       neighborhood, matching_radius_miles, market,
+      hide_from_discover,
+      open_to_share_table, ideal_dinner_cuisine, ideal_dinner_vibe, ideal_dinner_group_size,
+      premium_until, subscription_source,
       created_at, updated_at
      FROM users 
      WHERE user_id = $1`,
@@ -47,8 +50,27 @@ const getMyProfile = asyncHandler(async (req, res) => {
       neighborhood: user.neighborhood || null,
       matching_radius_miles: matchingRadius,
       market: user.market || null,
+      hide_from_discover: user.hide_from_discover ?? false,
+      open_to_share_table: user.open_to_share_table ?? false,
+      ideal_dinner_cuisine: user.ideal_dinner_cuisine ?? null,
+      ideal_dinner_vibe: user.ideal_dinner_vibe ?? null,
+      ideal_dinner_group_size: user.ideal_dinner_group_size ?? null,
       created_at: user.created_at,
       updated_at: user.updated_at,
+      subscription: (() => {
+        const until = user.premium_until ? new Date(user.premium_until) : null;
+        const isPremium = until && until > new Date();
+        return {
+          plan: isPremium ? 'premium' : 'free',
+          expires_at: user.premium_until ? user.premium_until.toISOString?.() ?? String(user.premium_until) : null,
+          source: user.subscription_source || null,
+        };
+      })(),
+      is_premium: (() => {
+        const until = user.premium_until ? new Date(user.premium_until) : null;
+        return !!(until && until > new Date());
+      })(),
+      premium_until: user.premium_until ? (user.premium_until.toISOString?.() ?? String(user.premium_until)) : null,
     },
   });
 });
@@ -64,6 +86,11 @@ const updateMyProfile = asyncHandler(async (req, res) => {
     neighborhood,
     matchingRadiusMiles,
     market,
+    hide_from_discover,
+    open_to_share_table,
+    ideal_dinner_cuisine,
+    ideal_dinner_vibe,
+    ideal_dinner_group_size,
   } = req.body;
   const userId = req.user.userId;
 
@@ -72,6 +99,26 @@ const updateMyProfile = asyncHandler(async (req, res) => {
   const values = [];
   let paramIndex = 1;
 
+  if (hide_from_discover !== undefined) {
+    updates.push(`hide_from_discover = $${paramIndex++}`);
+    values.push(Boolean(hide_from_discover));
+  }
+  if (open_to_share_table !== undefined) {
+    updates.push(`open_to_share_table = $${paramIndex++}`);
+    values.push(Boolean(open_to_share_table));
+  }
+  if (ideal_dinner_cuisine !== undefined) {
+    updates.push(`ideal_dinner_cuisine = $${paramIndex++}`);
+    values.push(ideal_dinner_cuisine == null || ideal_dinner_cuisine === '' ? null : String(ideal_dinner_cuisine).slice(0, 100));
+  }
+  if (ideal_dinner_vibe !== undefined) {
+    updates.push(`ideal_dinner_vibe = $${paramIndex++}`);
+    values.push(ideal_dinner_vibe == null || ideal_dinner_vibe === '' ? null : String(ideal_dinner_vibe).slice(0, 100));
+  }
+  if (ideal_dinner_group_size !== undefined) {
+    updates.push(`ideal_dinner_group_size = $${paramIndex++}`);
+    values.push(ideal_dinner_group_size == null || ideal_dinner_group_size === '' ? null : String(ideal_dinner_group_size).slice(0, 50));
+  }
   if (bio !== undefined) {
     updates.push(`bio = $${paramIndex++}`);
     values.push(bio);
@@ -98,9 +145,11 @@ const updateMyProfile = asyncHandler(async (req, res) => {
   }
   if (matchingRadiusMiles !== undefined) {
     const num = Number(matchingRadiusMiles);
-    const valid = !Number.isNaN(num) && num >= 1.5 && num <= 5;
+    if (Number.isNaN(num) || num < 1.5 || num > 5) {
+      throw new AppError('matching_radius_miles must be a number between 1.5 and 5', 400);
+    }
     updates.push(`matching_radius_miles = $${paramIndex++}`);
-    values.push(valid ? num : 1.5);
+    values.push(num);
   }
   if (market !== undefined) {
     updates.push(`market = $${paramIndex++}`);
@@ -121,7 +170,8 @@ const updateMyProfile = asyncHandler(async (req, res) => {
      RETURNING user_id, email, first_name, last_name, bio, occupation, 
                conversation_preference, dietary_tags, profile_photo_url, 
                instagram_handle, instagram_is_verified,
-               neighborhood, matching_radius_miles, market`,
+               neighborhood, matching_radius_miles, market, hide_from_discover,
+               open_to_share_table, ideal_dinner_cuisine, ideal_dinner_vibe, ideal_dinner_group_size`,
     values
   );
 
@@ -150,6 +200,11 @@ const updateMyProfile = asyncHandler(async (req, res) => {
       neighborhood: user.neighborhood || null,
       matching_radius_miles: matchingRadius,
       market: user.market || null,
+      hide_from_discover: user.hide_from_discover ?? false,
+      open_to_share_table: user.open_to_share_table ?? false,
+      ideal_dinner_cuisine: user.ideal_dinner_cuisine ?? null,
+      ideal_dinner_vibe: user.ideal_dinner_vibe ?? null,
+      ideal_dinner_group_size: user.ideal_dinner_group_size ?? null,
     },
   });
 });
@@ -301,9 +356,180 @@ const generateAIBio = asyncHandler(async (req, res) => {
   }
 });
 
+// Get current user notification preferences
+const getNotificationPreferences = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const result = await query(
+    `SELECT user_id, matches, messages, reservations, promotions, created_at, updated_at
+     FROM user_notification_preferences WHERE user_id = $1`,
+    [userId]
+  );
+  const row = result.rows[0];
+  const prefs = {
+    matches: row ? (row.matches !== false) : true,
+    messages: row ? (row.messages !== false) : true,
+    reservations: row ? (row.reservations !== false) : true,
+    promotions: row ? (row.promotions !== false) : true,
+  };
+  res.json({ notification_preferences: prefs });
+});
+
+// Update current user notification preferences
+const updateNotificationPreferences = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { matches, messages, reservations, promotions } = req.body;
+  const current = await query(
+    `SELECT matches, messages, reservations, promotions FROM user_notification_preferences WHERE user_id = $1`,
+    [userId]
+  );
+  const row = current.rows[0];
+  const m = matches !== undefined ? Boolean(matches) : (row ? row.matches !== false : true);
+  const msg = messages !== undefined ? Boolean(messages) : (row ? row.messages !== false : true);
+  const r = reservations !== undefined ? Boolean(reservations) : (row ? row.reservations !== false : true);
+  const p = promotions !== undefined ? Boolean(promotions) : (row ? row.promotions !== false : true);
+  await query(
+    `INSERT INTO user_notification_preferences (user_id, matches, messages, reservations, promotions)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (user_id) DO UPDATE SET matches = $2, messages = $3, reservations = $4, promotions = $5, updated_at = CURRENT_TIMESTAMP`,
+    [userId, m, msg, r, p]
+  );
+  res.json({
+    notification_preferences: { matches: m, messages: msg, reservations: r, promotions: p },
+  });
+});
+
+// Recently viewed restaurants (Phase 3.2)
+const recordRecentRestaurant = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { restaurant_id } = req.body;
+  if (!restaurant_id) throw new AppError('restaurant_id required', 400);
+  await query(
+    `INSERT INTO user_recent_restaurants (user_id, restaurant_id) VALUES ($1, $2)
+     ON CONFLICT (user_id, restaurant_id) DO UPDATE SET viewed_at = NOW()`,
+    [userId, restaurant_id]
+  );
+  res.status(204).send();
+});
+
+const getRecentRestaurants = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const result = await query(
+    `SELECT urr.restaurant_id, urr.viewed_at, r.name, r.cuisine_type, r.photo_url, r.city
+     FROM user_recent_restaurants urr
+     JOIN restaurants r ON r.restaurant_id = urr.restaurant_id
+     WHERE urr.user_id = $1
+     ORDER BY urr.viewed_at DESC
+     LIMIT 15`,
+    [userId]
+  );
+  res.json({ restaurants: result.rows });
+});
+
+// Onboarding status (Phase 4.2) - derived from existing data
+const getOnboardingStatus = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const [profile, checkIns, matches] = await Promise.all([
+    query(
+      'SELECT is_photo_verified, dietary_tags FROM users WHERE user_id = $1',
+      [userId]
+    ),
+    query('SELECT 1 FROM check_ins WHERE user_id = $1 LIMIT 1', [userId]),
+    query(
+      `SELECT 1 FROM matches WHERE (requester_id = $1 OR receiver_id = $1) AND status = 'accepted' LIMIT 1`,
+      [userId]
+    ),
+  ]);
+  const p = profile.rows[0] || {};
+  let dietaryTags = p.dietary_tags;
+  if (typeof dietaryTags === 'string') {
+    try { dietaryTags = JSON.parse(dietaryTags); } catch { dietaryTags = []; }
+  }
+  const dietary_set = Array.isArray(dietaryTags) ? dietaryTags.length > 0 : !!dietaryTags;
+  res.json({
+    photo_verified: !!p.is_photo_verified,
+    dietary_set,
+    first_checkin: (checkIns.rows.length > 0),
+    first_match: (matches.rows.length > 0),
+  });
+});
+
+// Dining stats / year in review (Phase 4.3)
+const getDiningStats = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const [totals, byCuisine, topRestaurants] = await Promise.all([
+    query(
+      `SELECT COUNT(*) as total_checkins, COUNT(DISTINCT ci.restaurant_id) as unique_restaurants, COUNT(DISTINCT r.city) as cities_visited
+       FROM check_ins ci
+       LEFT JOIN restaurants r ON ci.restaurant_id = r.restaurant_id
+       WHERE ci.user_id = $1`,
+      [userId]
+    ),
+    query(
+      `SELECT r.cuisine_type, COUNT(*) as count
+       FROM check_ins ci
+       JOIN restaurants r ON ci.restaurant_id = r.restaurant_id
+       WHERE ci.user_id = $1 AND r.cuisine_type IS NOT NULL AND r.cuisine_type != ''
+       GROUP BY r.cuisine_type
+       ORDER BY count DESC
+       LIMIT 10`,
+      [userId]
+    ),
+    query(
+      `SELECT r.restaurant_id, r.name, r.cuisine_type, r.city, COUNT(*) as visit_count
+       FROM check_ins ci
+       JOIN restaurants r ON ci.restaurant_id = r.restaurant_id
+       WHERE ci.user_id = $1
+       GROUP BY r.restaurant_id, r.name, r.cuisine_type, r.city
+       ORDER BY visit_count DESC
+       LIMIT 10`,
+      [userId]
+    ),
+  ]);
+  const t = totals.rows[0] || {};
+  res.json({
+    total_checkins: parseInt(t.total_checkins) || 0,
+    unique_restaurants: parseInt(t.unique_restaurants) || 0,
+    cities_visited: parseInt(t.cities_visited) || 0,
+    top_cuisines: byCuisine.rows,
+    top_restaurants: topRestaurants.rows,
+  });
+});
+
+// Activity feed preference (Phase 4.4)
+const getActivityPreferences = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const result = await query(
+    'SELECT show_my_activity FROM user_activity_preferences WHERE user_id = $1',
+    [userId]
+  );
+  const row = result.rows[0];
+  res.json({
+    show_my_activity: row ? row.show_my_activity !== false : true,
+  });
+});
+
+const updateActivityPreferences = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { show_my_activity } = req.body;
+  await query(
+    `INSERT INTO user_activity_preferences (user_id, show_my_activity) VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE SET show_my_activity = $2, updated_at = NOW()`,
+    [userId, show_my_activity !== false]
+  );
+  res.json({ show_my_activity: show_my_activity !== false });
+});
+
 module.exports = {
   getMyProfile,
   updateMyProfile,
   getUserById,
   generateAIBio,
+  getNotificationPreferences,
+  updateNotificationPreferences,
+  getActivityPreferences,
+  updateActivityPreferences,
+  recordRecentRestaurant,
+  getRecentRestaurants,
+  getOnboardingStatus,
+  getDiningStats,
 };

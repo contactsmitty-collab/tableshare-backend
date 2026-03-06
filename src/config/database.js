@@ -32,9 +32,14 @@ const pool = new Pool({
   connectionTimeoutMillis: 2000,
 });
 
+const QUERY_TIMEOUT_MS = parseInt(process.env.DB_QUERY_TIMEOUT_MS || '30000', 10) || 30000;
+
 const query = async (text, params) => {
   try {
-    const res = await pool.query(text, params);
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Query timeout')), QUERY_TIMEOUT_MS);
+    });
+    const res = await Promise.race([pool.query(text, params), timeoutPromise]);
     return res;
   } catch (error) {
     console.error('Database query error:', error);

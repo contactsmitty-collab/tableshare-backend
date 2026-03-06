@@ -37,6 +37,40 @@ const getMyCheckIns = asyncHandler(async (req, res) => {
   });
 });
 
+// Get user's active check-ins only (for check-out flow)
+const getMyActiveCheckIns = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+
+  const result = await query(
+    `SELECT 
+      ci.check_in_id, ci.party_size, ci.notes, ci.photo_url,
+      ci.check_in_time, ci.is_active, ci.group_id,
+      r.restaurant_id, r.name as restaurant_name, r.address, r.city
+     FROM check_ins ci
+     JOIN restaurants r ON ci.restaurant_id = r.restaurant_id
+     WHERE ci.user_id = $1 AND ci.is_active = true
+       AND ci.check_in_time > NOW() - INTERVAL '12 hours'
+     ORDER BY ci.check_in_time DESC`,
+    [userId]
+  );
+
+  res.json({
+    data: result.rows.map(row => ({
+      check_in_id: row.check_in_id,
+      restaurant_id: row.restaurant_id,
+      restaurant_name: row.restaurant_name,
+      address: row.address,
+      city: row.city,
+      party_size: row.party_size,
+      notes: row.notes,
+      check_in_time: row.check_in_time,
+      is_active: row.is_active,
+      photo_url: row.photo_url,
+      group_id: row.group_id,
+    })),
+  });
+});
+
 // Create check-in
 const createCheckIn = asyncHandler(async (req, res) => {
   const userId = req.user.userId;
@@ -109,6 +143,12 @@ const createCheckIn = asyncHandler(async (req, res) => {
   // Award points for check-in
   const checkInId = result.rows[0].check_in_id;
   await pointsService.awardPoints(userId, 'check_in', null, checkInId, 'Check-in at restaurant');
+
+  // Activity feed: record check-in for friends’ feed (non-blocking)
+  query(
+    `INSERT INTO activities (user_id, type, target_type, target_id) VALUES ($1, 'check_in', 'restaurant', $2)`,
+    [userId, restaurantId]
+  ).catch(() => {});
   
   // Award bonus points for photo
   if (photoUrl) {
@@ -408,7 +448,26 @@ const getActiveCheckIn = asyncHandler(async (req, res) => {
   });
 });
 
-// Delete a check-in
+// Deactivate (check out) a check-in — sets is_active = false, preserves history
+const deactivateCheckIn = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { checkInId } = req.params;
+
+  const result = await query(
+    `UPDATE check_ins SET is_active = false
+     WHERE check_in_id = $1 AND user_id = $2 AND is_active = true
+     RETURNING check_in_id`,
+    [checkInId, userId]
+  );
+
+  if (result.rows.length === 0) {
+    throw new AppError('Check-in not found, not yours, or already checked out', 404);
+  }
+
+  res.json({ message: 'Checked out successfully' });
+});
+
+// Delete a check-in (removes from history)
 const deleteCheckIn = asyncHandler(async (req, res) => {
   const userId = req.user.userId;
   const { checkInId } = req.params;
@@ -427,9 +486,11 @@ const deleteCheckIn = asyncHandler(async (req, res) => {
 
 module.exports = {
   getMyCheckIns,
+  getMyActiveCheckIns,
   createCheckIn,
   getRestaurantCheckIns,
   getActiveCheckIn,
+  deactivateCheckIn,
   deleteCheckIn,
   getMyGroups,
   discoverGroups,

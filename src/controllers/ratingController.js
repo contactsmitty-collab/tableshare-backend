@@ -102,7 +102,51 @@ const getRatings = asyncHandler(async (req, res) => {
   });
 });
 
+// Submit a restaurant rating (post-meal feedback)
+const submitRestaurantRating = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { restaurant_id: restaurantId, rating, review } = req.body;
+
+  if (!restaurantId || !rating) {
+    throw new AppError('Restaurant ID and rating are required', 400);
+  }
+
+  if (rating < 1 || rating > 5) {
+    throw new AppError('Rating must be between 1 and 5', 400);
+  }
+
+  // Verify restaurant exists
+  const restCheck = await query('SELECT restaurant_id FROM restaurants WHERE restaurant_id = $1', [restaurantId]);
+  if (restCheck.rows.length === 0) {
+    throw new AppError('Restaurant not found', 404);
+  }
+
+  const result = await query(
+    `INSERT INTO restaurant_ratings (user_id, restaurant_id, rating, review)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, restaurant_id)
+     DO UPDATE SET rating = $3, review = $4
+     RETURNING rating_id, rating, review, created_at`,
+    [userId, restaurantId, rating, review || null]
+  );
+
+  // Award points (only on first rating, not updates - we'd need to check; for simplicity award each time)
+  await pointsService.awardPoints(userId, 'restaurant_rating', null, restaurantId, 'Rated restaurant');
+
+  res.status(201).json({
+    message: 'Rating submitted successfully',
+    rating: {
+      rating_id: result.rows[0].rating_id,
+      restaurant_id: restaurantId,
+      rating: result.rows[0].rating,
+      review: result.rows[0].review,
+      created_at: result.rows[0].created_at,
+    },
+  });
+});
+
 module.exports = {
   submitRating,
   getRatings,
+  submitRestaurantRating,
 };

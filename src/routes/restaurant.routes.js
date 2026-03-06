@@ -1,16 +1,31 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
 const { query, pool } = require('../config/database');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { getJwtSecret } = require('../config/env');
 const { reservationCreateLimiter } = require('../middleware/rateLimit');
 const googlePlaces = require('../services/googlePlacesService');
 const notificationService = require('../services/notificationService');
+const walletPassService = require('../services/walletPassService');
 const { events } = require('../utils/events');
 const { generateRecommendations } = require('../config/openai');
 
+/** Dedupe restaurant rows by venue (name + city) so the same place appears once in any list. */
+function dedupeByVenue(rows) {
+  if (!rows || !Array.isArray(rows)) return [];
+  const seen = new Set();
+  return rows.filter((r) => {
+    const key = `${(r.name || '').toLowerCase().trim()}|${(r.city || '').toLowerCase().trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 router.get('/', asyncHandler(async (req, res) => {
-  const { dietary, city } = req.query;
+  const { dietary, city, group_friendly } = req.query;
 
   let queryText = 'SELECT * FROM restaurants';
   const queryParams = [];
@@ -30,6 +45,10 @@ router.get('/', asyncHandler(async (req, res) => {
     });
   }
 
+  if (group_friendly === '1' || group_friendly === 'true') {
+    conditions.push('(has_private_rooms = true OR (max_party_size IS NOT NULL AND max_party_size >= 6))');
+  }
+
   if (conditions.length > 0) {
     queryText += ' WHERE ' + conditions.join(' AND ');
   }
@@ -37,14 +56,66 @@ router.get('/', asyncHandler(async (req, res) => {
   queryText += ' ORDER BY COALESCE(rating, 0) DESC, name ASC';
 
   const result = await query(queryText, queryParams);
-  res.json({ restaurants: result.rows });
+  res.json({ restaurants: dedupeByVenue(result.rows || []) });
 }));
 
 router.get('/featured', asyncHandler(async (req, res) => {
   const result = await query(
-    'SELECT * FROM restaurants ORDER BY COALESCE(rating, 0) DESC LIMIT 10'
+    `SELECT * FROM restaurants ORDER BY COALESCE(is_sponsored, false) DESC, COALESCE(rating, 0) DESC LIMIT 20`
   );
-  res.json({ restaurants: result.rows });
+  const rows = dedupeByVenue(result.rows || []).slice(0, 10);
+  res.json({ restaurants: rows });
+}));
+
+// Open seats by restaurant (static path so it cannot be shadowed by GET /:id)
+router.get('/open-seats/restaurant/:restaurantId', asyncHandler(async (req, res) => {
+  const { restaurantId } = req.params;
+  const { lat, lng, radius } = req.query;
+
+  await query(`SELECT expire_old_open_seats()`);
+
+  let queryText = `
+    SELECT os.*,
+           r.name as restaurant_name, r.address as restaurant_address, r.photo_url as restaurant_photo,
+           u.username as host_username, u.first_name as host_first_name, u.last_name as host_last_name,
+           u.avatar_url as host_avatar_url, u.age as host_age, u.bio as host_bio,
+           (SELECT COUNT(*) FROM seat_requests sr WHERE sr.open_seat_id = os.open_seat_id AND sr.status = 'pending') as pending_request_count
+    FROM open_seats os
+    JOIN restaurants r ON os.restaurant_id = r.restaurant_id
+    JOIN users u ON os.host_user_id = u.user_id
+    WHERE os.restaurant_id = $1
+    AND os.status = 'open'
+    AND os.expires_at > NOW()
+  `;
+  const values = [restaurantId];
+
+  if (lat && lng) {
+    queryText = `
+      SELECT os.*,
+             r.name as restaurant_name, r.address as restaurant_address, r.photo_url as restaurant_photo,
+             u.username as host_username, u.first_name as host_first_name, u.last_name as host_last_name,
+             u.avatar_url as host_avatar_url, u.age as host_age, u.bio as host_bio,
+             (SELECT COUNT(*) FROM seat_requests sr WHERE sr.open_seat_id = os.open_seat_id AND sr.status = 'pending') as pending_request_count,
+             (6371 * acos(cos(radians($2)) * cos(radians(os.latitude)) * cos(radians(os.longitude) - radians($3)) + sin(radians($2)) * sin(radians(os.latitude)))) as distance_km
+      FROM open_seats os
+      JOIN restaurants r ON os.restaurant_id = r.restaurant_id
+      JOIN users u ON os.host_user_id = u.user_id
+      WHERE os.restaurant_id = $1
+      AND os.status = 'open'
+      AND os.expires_at > NOW()
+    `;
+    values.push(lat, lng);
+
+    if (radius) {
+      queryText += ` AND (6371 * acos(cos(radians($2)) * cos(radians(os.latitude)) * cos(radians(os.longitude) - radians($3)) + sin(radians($2)) * sin(radians(os.latitude)))) <= $${values.length + 1}`;
+      values.push(parseFloat(radius));
+    }
+  }
+
+  queryText += ' ORDER BY os.created_at DESC';
+
+  const result = await query(queryText, values);
+  res.json({ open_seats: result.rows });
 }));
 
 // Featured Bars & Nightclubs endpoint
@@ -79,20 +150,20 @@ router.get('/featured/bars-nightclubs', asyncHandler(async (req, res) => {
   queryText += ` ORDER BY COALESCE(r.rating, 0) DESC, RANDOM() LIMIT 15`;
 
   const result = await query(queryText, queryParams);
+  const rows = dedupeByVenue(result.rows || []);
 
-  // Group by venue type
   const grouped = {
-    bars: result.rows.filter(r => r.venue_type === 'bar'),
-    nightclubs: result.rows.filter(r => r.venue_type === 'nightclub'),
-    rooftops: result.rows.filter(r => r.venue_type === 'rooftop_bar'),
-    all: result.rows
+    bars: rows.filter(r => r.venue_type === 'bar'),
+    nightclubs: rows.filter(r => r.venue_type === 'nightclub'),
+    rooftops: rows.filter(r => r.venue_type === 'rooftop_bar'),
+    all: rows
   };
 
   res.json({
     title: 'Featured Bars & Nightclubs',
-    venues: result.rows,
+    venues: rows,
     grouped: grouped,
-    count: result.rows.length
+    count: rows.length
   });
 }));
 
@@ -103,14 +174,13 @@ router.get('/nearby', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'lat and lng query parameters are required' });
   }
 
-  const restaurants = await googlePlaces.findNearby(
+  const rows = await googlePlaces.findNearby(
     parseFloat(lat),
     parseFloat(lng),
     parseFloat(radius) || 10,
     parseInt(limit) || 50
   );
-
-  res.json({ restaurants });
+  res.json({ restaurants: dedupeByVenue(rows || []) });
 }));
 
 router.get('/autocomplete', asyncHandler(async (req, res) => {
@@ -148,7 +218,7 @@ router.get('/search', asyncHandler(async (req, res) => {
      LIMIT 50`,
     [searchTerm]
   );
-  res.json({ restaurants: result.rows });
+  res.json({ restaurants: dedupeByVenue(result.rows || []) });
 }));
 
 router.get('/place/:placeId', asyncHandler(async (req, res) => {
@@ -297,7 +367,7 @@ router.get('/by-vibe', asyncHandler(async (req, res) => {
           AND dg.is_active = TRUE AND dg.checked_in_at > NOW() - INTERVAL '4 hours'
         WHERE 1=1 ${locationFilter}
         GROUP BY r.restaurant_id
-        ORDER BY group_count DESC
+        ORDER BY group_count DESC, COALESCE(r.has_private_rooms, false) DESC, r.max_party_size DESC NULLS LAST
         LIMIT 20`;
       break;
 
@@ -362,11 +432,22 @@ router.get('/by-vibe', asyncHandler(async (req, res) => {
   }
 
   const result = await query(vibeQuery, locationParams);
+  let rows = result.rows || [];
+  if (vibeType === 'groups') {
+    const seen = new Set();
+    rows = rows.filter((r) => {
+      const id = r.restaurant_id;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+  rows = dedupeByVenue(rows);
 
   res.json({
     vibe: vibeType,
     title: vibeTitle,
-    restaurants: result.rows,
+    restaurants: rows,
   });
 }));
 
@@ -642,9 +723,9 @@ router.get('/trending', asyncHandler(async (req, res) => {
     INNER JOIN check_ins c ON c.restaurant_id = r.restaurant_id AND c.checked_in = true
     GROUP BY r.restaurant_id
     ORDER BY active_users DESC
-    LIMIT 10
+    LIMIT 20
   `);
-  res.json({ restaurants: result.rows, updatedAt: new Date().toISOString() });
+  res.json({ restaurants: dedupeByVenue(result.rows || []).slice(0, 10), updatedAt: new Date().toISOString() });
 }));
 
 // GET /restaurants/popular-with-tablesharers - most completed matches
@@ -658,9 +739,9 @@ router.get('/popular-with-tablesharers', asyncHandler(async (req, res) => {
       AND m.created_at >= NOW() - MAKE_INTERVAL(days => $1)
     GROUP BY r.restaurant_id
     ORDER BY match_count DESC
-    LIMIT 10
+    LIMIT 20
   `, [days]);
-  res.json({ restaurants: result.rows });
+  res.json({ restaurants: dedupeByVenue(result.rows || []).slice(0, 10) });
 }));
 
 // GET /restaurants/category/:category - filter by tag/vibe category
@@ -700,14 +781,7 @@ router.get('/category/:category', asyncHandler(async (req, res) => {
   }
 
   const result = await query(queryText, queryParams);
-  const seen = new Map();
-  const deduped = result.rows.filter((row) => {
-    const key = `${(row.name || '').trim().toLowerCase()}|${(row.city || '').trim().toLowerCase()}`;
-    if (seen.has(key)) return false;
-    seen.set(key, true);
-    return true;
-  });
-  res.json({ restaurants: deduped });
+  res.json({ restaurants: dedupeByVenue(result.rows || []) });
 }));
 
 // GET /restaurants/new - added in last 30 days (one per name+city, newest first)
@@ -722,7 +796,7 @@ router.get('/new', asyncHandler(async (req, res) => {
     ORDER BY created_at DESC
     LIMIT 15
   `);
-  res.json({ restaurants: result.rows });
+  res.json({ restaurants: dedupeByVenue(result.rows || []) });
 }));
 
 // GET /restaurants/time-based - restaurants appropriate for current time of day
@@ -749,18 +823,94 @@ router.get('/time-based', asyncHandler(async (req, res) => {
 
   const tags = periodTags[period] || periodTags['dinner'];
   const tagConditions = tags.map((_, i) => `$${i + 1} = ANY(tags)`).join(' OR ');
-  const queryText = `SELECT * FROM restaurants WHERE ${tagConditions} ORDER BY COALESCE(rating, 0) DESC LIMIT 15`;
+  const queryText = `SELECT * FROM restaurants WHERE ${tagConditions} ORDER BY COALESCE(rating, 0) DESC LIMIT 25`;
 
   const result = await query(queryText, tags);
-  res.json({ restaurants: result.rows, period });
+  res.json({ restaurants: dedupeByVenue(result.rows || []).slice(0, 15), period });
+}));
+
+// Get open seats at a restaurant (must be before GET /:id so /:id/open-seats matches)
+router.get('/:id/open-seats', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { lat, lng, radius } = req.query;
+
+  await query(`SELECT expire_old_open_seats()`);
+
+  let queryText = `
+    SELECT os.*,
+           r.name as restaurant_name, r.address as restaurant_address, r.photo_url as restaurant_photo,
+           u.username as host_username, u.first_name as host_first_name, u.last_name as host_last_name,
+           u.avatar_url as host_avatar_url, u.age as host_age, u.bio as host_bio,
+           (SELECT COUNT(*) FROM seat_requests sr WHERE sr.open_seat_id = os.open_seat_id AND sr.status = 'pending') as pending_request_count
+    FROM open_seats os
+    JOIN restaurants r ON os.restaurant_id = r.restaurant_id
+    JOIN users u ON os.host_user_id = u.user_id
+    WHERE os.restaurant_id = $1
+    AND os.status = 'open'
+    AND os.expires_at > NOW()
+  `;
+  const values = [id];
+
+  if (lat && lng) {
+    queryText = `
+      SELECT os.*,
+             r.name as restaurant_name, r.address as restaurant_address, r.photo_url as restaurant_photo,
+             u.username as host_username, u.first_name as host_first_name, u.last_name as host_last_name,
+             u.avatar_url as host_avatar_url, u.age as host_age, u.bio as host_bio,
+             (SELECT COUNT(*) FROM seat_requests sr WHERE sr.open_seat_id = os.open_seat_id AND sr.status = 'pending') as pending_request_count,
+             (6371 * acos(cos(radians($2)) * cos(radians(os.latitude)) * cos(radians(os.longitude) - radians($3)) + sin(radians($2)) * sin(radians(os.latitude)))) as distance_km
+      FROM open_seats os
+      JOIN restaurants r ON os.restaurant_id = r.restaurant_id
+      JOIN users u ON os.host_user_id = u.user_id
+      WHERE os.restaurant_id = $1
+      AND os.status = 'open'
+      AND os.expires_at > NOW()
+    `;
+    values.push(lat, lng);
+
+    if (radius) {
+      queryText += ` AND (6371 * acos(cos(radians($2)) * cos(radians(os.latitude)) * cos(radians(os.longitude) - radians($3)) + sin(radians($2)) * sin(radians(os.latitude)))) <= $${values.length + 1}`;
+      values.push(parseFloat(radius));
+    }
+  }
+
+  queryText += ' ORDER BY os.created_at DESC';
+
+  const result = await query(queryText, values);
+  res.json({ open_seats: result.rows });
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
   const result = await query(
     'SELECT * FROM restaurants WHERE restaurant_id = $1',
-    [req.params.id]
+    [id]
   );
-  res.json({ restaurant: result.rows[0] || null });
+  const restaurant = result.rows[0] || null;
+  if (!restaurant) {
+    return res.json({ restaurant: null });
+  }
+  const countResult = await query(
+    `SELECT COUNT(*) as c FROM dining_groups
+     WHERE checked_in_restaurant_id = $1 AND checked_in_at > NOW() - INTERVAL '24 hours'`,
+    [id]
+  );
+  const active_groups_count = parseInt(countResult.rows[0]?.c || '0', 10);
+  res.json({ restaurant: { ...restaurant, active_groups_count } });
+}));
+
+// Diner photos at restaurant (Phase 3.4)
+router.get('/:id/photos', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const result = await query(
+    `SELECT ci.check_in_id, ci.photo_url, ci.check_in_time
+     FROM check_ins ci
+     WHERE ci.restaurant_id = $1 AND ci.photo_url IS NOT NULL AND ci.photo_url != ''
+     ORDER BY ci.check_in_time DESC
+     LIMIT 24`,
+    [id]
+  );
+  res.json({ photos: result.rows });
 }));
 
 // Table Availability & Wait Times API
@@ -1140,7 +1290,7 @@ router.get('/filter/by-events', asyncHandler(async (req, res) => {
   queryText += ' ORDER BY COALESCE(rating, 0) DESC, name ASC LIMIT 50';
 
   const result = await query(queryText, values);
-  res.json({ restaurants: result.rows });
+  res.json({ restaurants: dedupeByVenue(result.rows || []) });
 }));
 
 // ============ RESERVATION API ============
@@ -1231,18 +1381,50 @@ router.post('/:id/reservations', reservationCreateLimiter, authenticateToken, as
   const {
     reservation_date,
     reservation_time,
-    party_size,
+    party_size: partySizeBody,
     special_requests,
     occasion,
     table_type,
     guest_name,
     guest_phone,
-    guest_email
+    guest_email,
+    group_id: groupId,
   } = req.body;
 
+  let groupIdToSave = null;
+  let party_size = partySizeBody != null ? parseInt(partySizeBody, 10) : null;
+
+  if (groupId) {
+    const memberCheck = await query(
+      'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+      [groupId, userId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ error: 'You must be a member of the group to book for it' });
+    }
+    const groupRow = await query(
+      'SELECT group_id, group_name FROM dining_groups WHERE group_id = $1',
+      [groupId]
+    );
+    if (groupRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+    groupIdToSave = groupId;
+    if (party_size == null || party_size < 1) {
+      const countResult = await query(
+        'SELECT COUNT(*) as c FROM group_members WHERE group_id = $1',
+        [groupId]
+      );
+      party_size = parseInt(countResult.rows[0]?.c || '1', 10) || 1;
+    }
+  }
+
   // Validate required fields
-  if (!reservation_date || !reservation_time || !party_size) {
-    return res.status(400).json({ error: 'reservation_date, reservation_time, and party_size are required' });
+  if (!reservation_date || !reservation_time) {
+    return res.status(400).json({ error: 'reservation_date and reservation_time are required' });
+  }
+  if (party_size == null || party_size < 1) {
+    return res.status(400).json({ error: 'party_size is required (or provide group_id)' });
   }
 
   // Check restaurant exists and accepts reservations
@@ -1314,14 +1496,14 @@ router.post('/:id/reservations', reservationCreateLimiter, authenticateToken, as
           `INSERT INTO reservations (
             restaurant_id, user_id, reservation_date, reservation_time, party_size,
             table_type, status, source, special_requests, occasion,
-            guest_name, guest_phone, guest_email, confirmation_code
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            guest_name, guest_phone, guest_email, confirmation_code, group_id
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
           RETURNING *`,
           [
             id, userId, reservation_date, reservation_time, party_size,
             table_type || 'standard', 'confirmed', 'app', special_requests || null,
             occasion || null, guest_name || null, guest_phone || null, guest_email || null,
-            confirmationCode
+            confirmationCode, groupIdToSave
           ]
         );
         await client.query('COMMIT');
@@ -1356,14 +1538,14 @@ router.post('/:id/reservations', reservationCreateLimiter, authenticateToken, as
     `INSERT INTO reservations (
       restaurant_id, user_id, reservation_date, reservation_time, party_size,
       table_type, status, source, special_requests, occasion,
-      guest_name, guest_phone, guest_email, confirmation_code
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      guest_name, guest_phone, guest_email, confirmation_code, group_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
     RETURNING *`,
     [
       id, userId, reservation_date, reservation_time, party_size,
       table_type || 'standard', 'confirmed', 'app', special_requests || null,
       occasion || null, guest_name || null, guest_phone || null, guest_email || null,
-      confirmationCode
+      confirmationCode, groupIdToSave
     ]
   );
 
@@ -1387,9 +1569,11 @@ router.get('/reservations/my', authenticateToken, asyncHandler(async (req, res) 
 
   let queryText = `
     SELECT r.*, rest.name as restaurant_name, rest.address as restaurant_address,
-           rest.photo_url as restaurant_photo, rest.reservation_phone as restaurant_phone
+           rest.photo_url as restaurant_photo, rest.reservation_phone as restaurant_phone,
+           dg.group_name as group_name
     FROM reservations r
     JOIN restaurants rest ON r.restaurant_id = rest.restaurant_id
+    LEFT JOIN dining_groups dg ON r.group_id = dg.group_id
     WHERE r.user_id = $1
   `;
   const values = [userId];
@@ -1480,9 +1664,10 @@ router.get('/reservations/:reservationId', authenticateToken, asyncHandler(async
   const result = await query(
     `SELECT r.*, rest.name as restaurant_name, rest.address as restaurant_address,
             rest.photo_url as restaurant_photo, rest.reservation_phone as restaurant_phone,
-            rest.latitude, rest.longitude
+            rest.latitude, rest.longitude, dg.group_name as group_name
      FROM reservations r
      JOIN restaurants rest ON r.restaurant_id = rest.restaurant_id
+     LEFT JOIN dining_groups dg ON r.group_id = dg.group_id
      WHERE r.reservation_id = $1 AND r.user_id = $2`,
     [reservationId, userId]
   );
@@ -1492,6 +1677,164 @@ router.get('/reservations/:reservationId', authenticateToken, asyncHandler(async
   }
 
   res.json({ reservation: result.rows[0] });
+}));
+
+// Allow either Bearer token or ?token= JWT for wallet-pass (native addPassFromUrl cannot send headers)
+function optionalWalletPassAuth(req, res, next) {
+  if (req.query.token) {
+    try {
+      const decoded = jwt.verify(req.query.token, getJwtSecret());
+      if (decoded.purpose === 'wallet-pass' && decoded.reservationId) {
+        req.walletPassReservationId = decoded.reservationId;
+        return next();
+      }
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid or expired pass link. Please try Add to Wallet again.' });
+    }
+  }
+  return authenticateToken(req, res, next);
+}
+
+// One-time URL for Add to Wallet (native iOS cannot send Authorization header when fetching the pass)
+router.get('/reservations/:reservationId/wallet-pass-token', authenticateToken, asyncHandler(async (req, res) => {
+  if (!walletPassService.isConfigured()) {
+    return res.status(503).json({ error: 'wallet_not_configured', message: 'Add to Wallet is not configured for this server.' });
+  }
+  const { reservationId } = req.params;
+  const userId = req.user.userId;
+  const result = await query(
+    'SELECT reservation_id FROM reservations WHERE reservation_id = $1 AND user_id = $2 AND status != $3',
+    [reservationId, userId, 'cancelled']
+  );
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Reservation not found' });
+  }
+  const token = jwt.sign(
+    { reservationId, purpose: 'wallet-pass' },
+    getJwtSecret(),
+    { expiresIn: '2m' }
+  );
+  const baseUrl = (process.env.API_PUBLIC_URL || '').replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
+  const path = `/api/v1/restaurants/reservations/${reservationId}/wallet-pass`;
+  const url = `${baseUrl}${path}?token=${token}`;
+  res.json({ url });
+}));
+
+// Get Apple Wallet .pkpass for a reservation (requires Wallet certificates + pass model; see passModel.pass/README)
+router.get('/reservations/:reservationId/wallet-pass', optionalWalletPassAuth, asyncHandler(async (req, res) => {
+  const reservationId = req.walletPassReservationId || req.params.reservationId;
+  const userId = req.user && req.user.userId;
+
+  if (!walletPassService.isConfigured()) {
+    return res.status(503).json({ error: 'wallet_not_configured', message: 'Add to Wallet is not configured for this server.' });
+  }
+
+  const result = await query(
+    `SELECT r.*, rest.name as restaurant_name, rest.address as restaurant_address, rest.photo_url as restaurant_photo_url, rest.thumbnail as restaurant_thumbnail, rest.cuisine_type as restaurant_cuisine
+     FROM reservations r
+     JOIN restaurants rest ON r.restaurant_id = rest.restaurant_id
+     WHERE r.reservation_id = $1${userId ? ' AND r.user_id = $2' : ''}`,
+    userId ? [reservationId, userId] : [reservationId]
+  );
+
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Reservation not found' });
+  }
+
+  const reservation = result.rows[0];
+  if (reservation.status === 'cancelled') {
+    return res.status(400).json({ error: 'Cannot add a cancelled reservation to Wallet' });
+  }
+
+  const buffer = await walletPassService.generateReservationPass(reservation);
+  if (!buffer) {
+    return res.status(500).json({ error: 'Failed to generate pass' });
+  }
+
+  res.set({
+    'Content-Type': 'application/vnd.apple.pkpass',
+    'Content-Disposition': 'attachment; filename="reservation.pkpass"',
+  });
+  res.send(buffer);
+}));
+
+// Update a reservation (date, time, party_size) with slot-availability check
+router.patch('/reservations/:reservationId', authenticateToken, asyncHandler(async (req, res) => {
+  const { reservationId } = req.params;
+  const userId = req.user.userId;
+  const { reservation_date, reservation_time, party_size } = req.body;
+
+  const checkResult = await query(
+    'SELECT r.*, rest.reservation_provider, rest.reservation_lead_time_hours, rest.name as restaurant_name FROM reservations r JOIN restaurants rest ON r.restaurant_id = rest.restaurant_id WHERE r.reservation_id = $1 AND r.user_id = $2',
+    [reservationId, userId]
+  );
+  if (checkResult.rows.length === 0) {
+    return res.status(404).json({ error: 'Reservation not found' });
+  }
+  const reservation = checkResult.rows[0];
+  if (reservation.status === 'cancelled' || reservation.status === 'completed') {
+    return res.status(400).json({ error: 'Cannot update a cancelled or completed reservation' });
+  }
+
+  const newDate = reservation_date || reservation.reservation_date;
+  const newTime = reservation_time || reservation.reservation_time;
+  const newPartySize = party_size != null ? Number(party_size) : reservation.party_size;
+  if (newPartySize < 1 || !Number.isInteger(newPartySize)) {
+    return res.status(400).json({ error: 'party_size must be a positive integer' });
+  }
+
+  const reservationDateTime = new Date(`${newDate}T${newTime}`);
+  const now = new Date();
+  const hoursUntil = (reservationDateTime - now) / (1000 * 60 * 60);
+  if (hoursUntil < reservation.reservation_lead_time_hours) {
+    return res.status(400).json({
+      error: `Reservations must be at least ${reservation.reservation_lead_time_hours} hours in advance`
+    });
+  }
+
+  const isInternal = !reservation.reservation_provider || reservation.reservation_provider === 'internal';
+  const timeNorm = /^\d{1,2}:\d{2}(:\d{2})?$/.test(newTime)
+    ? (newTime.length <= 5 ? `${newTime}:00` : newTime)
+    : newTime;
+
+  if (isInternal) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Return capacity to old slot
+      await client.query(
+        `UPDATE reservation_slots SET available_tables = LEAST(available_tables + 1, total_tables), updated_at = NOW()
+         WHERE slot_id = (SELECT slot_id FROM reservation_slots WHERE restaurant_id = $1 AND slot_date = $2 AND slot_time = $3::time AND party_size_min <= $4 AND party_size_max >= $4 ORDER BY slot_id LIMIT 1)`,
+        [reservation.restaurant_id, reservation.reservation_date, reservation.reservation_time, reservation.party_size]
+      );
+      const slotUpdate = await client.query(
+        `UPDATE reservation_slots SET available_tables = available_tables - 1, updated_at = NOW()
+         WHERE slot_id = (SELECT slot_id FROM reservation_slots WHERE restaurant_id = $1 AND slot_date = $2 AND slot_time = $3::time AND party_size_min <= $4 AND party_size_max >= $4 AND available_tables > 0 AND is_available = true ORDER BY slot_id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING slot_id`,
+        [reservation.restaurant_id, newDate, timeNorm, newPartySize]
+      );
+      if (slotUpdate.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'No availability for the requested date, time, or party size' });
+      }
+      const updateResult = await client.query(
+        `UPDATE reservations SET reservation_date = $1, reservation_time = $2, party_size = $3 WHERE reservation_id = $4 AND user_id = $5 RETURNING *`,
+        [newDate, timeNorm, newPartySize, reservationId, userId]
+      );
+      await client.query('COMMIT');
+      return res.json({ success: true, reservation: updateResult.rows[0], message: 'Reservation updated' });
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  const updateResult = await query(
+    `UPDATE reservations SET reservation_date = $1, reservation_time = $2, party_size = $3 WHERE reservation_id = $4 AND user_id = $5 RETURNING *`,
+    [newDate, timeNorm, newPartySize, reservationId, userId]
+  );
+  res.json({ success: true, reservation: updateResult.rows[0], message: 'Reservation updated' });
 }));
 
 // ============ OPEN SEATS / JOIN A TABLE API ============
@@ -1568,58 +1911,6 @@ router.post('/open-seats', authenticateToken, asyncHandler(async (req, res) => {
     open_seat: result.rows[0],
     message: `You're now offering ${available_seats} open seat${available_seats > 1 ? 's' : ''} at ${restaurantResult.rows[0].name}!`
   });
-}));
-
-// Get open seats at a restaurant
-router.get('/:id/open-seats', asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { lat, lng, radius } = req.query;
-
-  // First expire any old open seats
-  await query(`SELECT expire_old_open_seats()`);
-
-  let queryText = `
-    SELECT os.*,
-           r.name as restaurant_name, r.address as restaurant_address, r.photo_url as restaurant_photo,
-           u.username as host_username, u.first_name as host_first_name, u.last_name as host_last_name,
-           u.avatar_url as host_avatar_url, u.age as host_age, u.bio as host_bio,
-           (SELECT COUNT(*) FROM seat_requests sr WHERE sr.open_seat_id = os.open_seat_id AND sr.status = 'pending') as pending_request_count
-    FROM open_seats os
-    JOIN restaurants r ON os.restaurant_id = r.restaurant_id
-    JOIN users u ON os.host_user_id = u.user_id
-    WHERE os.restaurant_id = $1
-    AND os.status = 'open'
-    AND os.expires_at > NOW()
-  `;
-  const values = [id];
-
-  if (lat && lng) {
-    queryText = `
-      SELECT os.*,
-             r.name as restaurant_name, r.address as restaurant_address, r.photo_url as restaurant_photo,
-             u.username as host_username, u.first_name as host_first_name, u.last_name as host_last_name,
-             u.avatar_url as host_avatar_url, u.age as host_age, u.bio as host_bio,
-             (SELECT COUNT(*) FROM seat_requests sr WHERE sr.open_seat_id = os.open_seat_id AND sr.status = 'pending') as pending_request_count,
-             (6371 * acos(cos(radians($2)) * cos(radians(os.latitude)) * cos(radians(os.longitude) - radians($3)) + sin(radians($2)) * sin(radians(os.latitude)))) as distance_km
-      FROM open_seats os
-      JOIN restaurants r ON os.restaurant_id = r.restaurant_id
-      JOIN users u ON os.host_user_id = u.user_id
-      WHERE os.restaurant_id = $1
-      AND os.status = 'open'
-      AND os.expires_at > NOW()
-    `;
-    values.push(lat, lng);
-
-    if (radius) {
-      queryText += ` AND (6371 * acos(cos(radians($2)) * cos(radians(os.latitude)) * cos(radians(os.longitude) - radians($3)) + sin(radians($2)) * sin(radians(os.latitude)))) <= $${values.length + 1}`;
-      values.push(parseFloat(radius));
-    }
-  }
-
-  queryText += ' ORDER BY os.created_at DESC';
-
-  const result = await query(queryText, values);
-  res.json({ open_seats: result.rows });
 }));
 
 // Request to join an open seat

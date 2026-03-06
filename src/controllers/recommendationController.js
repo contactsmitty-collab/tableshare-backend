@@ -78,6 +78,7 @@ const getForYouRecommendations = async (req, res) => {
       recommendations = await applyDistanceScoring(recommendations, latitude, longitude);
     }
     let enrichedRecommendations = await enrichWithReasoning(recommendations, userId);
+    enrichedRecommendations = await applyGroupPreferenceBoost(userId, enrichedRecommendations);
 
     if (generateRecommendations && enrichedRecommendations.length > 0) {
       try {
@@ -694,7 +695,9 @@ async function getCachedRecommendations(userId, type, limit, offset) {
       r.address,
       r.city,
       r.latitude,
-      r.longitude
+      r.longitude,
+      r.has_private_rooms,
+      r.max_party_size
      FROM recommendation_cache rc
      JOIN restaurants r ON rc.restaurant_id = r.restaurant_id
      WHERE rc.user_id = $1
@@ -759,11 +762,14 @@ async function getForYouFallback(userId, limitNum) {
       r.address,
       r.city,
       r.latitude,
-      r.longitude
+      r.longitude,
+      r.is_sponsored,
+      r.has_private_rooms,
+      r.max_party_size
      FROM restaurants r
      WHERE 1=1
      ${hasExclude ? 'AND r.restaurant_id != ALL($2)' : ''}
-     ORDER BY r.rating DESC NULLS LAST, r.name
+     ORDER BY COALESCE(r.is_sponsored, false) DESC, r.rating DESC NULLS LAST, r.name
      LIMIT $1`,
     hasExclude ? [limitNum, excludeIds] : [limitNum]
   );
@@ -773,6 +779,26 @@ async function getForYouFallback(userId, limitNum) {
     overall_score: 0.8,
     reason_type: 'for_you',
     reason_description: 'Recommended for you',
+  }));
+}
+
+/** When user has ideal_dinner_group_size indicating group dining, boost restaurants with private rooms or large party capacity. */
+async function applyGroupPreferenceBoost(userId, recommendations) {
+  if (!recommendations || recommendations.length === 0) return recommendations;
+  const userRow = await query(
+    'SELECT ideal_dinner_group_size FROM users WHERE user_id = $1',
+    [userId]
+  ).catch(() => ({ rows: [] }));
+  const groupSize = (userRow.rows[0]?.ideal_dinner_group_size || '').toLowerCase();
+  const isGroupPreference = /group|3\+|4\+|5\+|6\+|large|party/.test(groupSize);
+  if (!isGroupPreference) return recommendations;
+  const sorted = [...recommendations].sort((a, b) => {
+    const score = (r) => (r.has_private_rooms ? 2 : 0) + (r.max_party_size >= 6 ? 1 : r.max_party_size >= 4 ? 0.5 : 0);
+    return score(b) - score(a);
+  });
+  return sorted.map((r) => ({
+    ...r,
+    reason_description: (r.has_private_rooms || r.max_party_size >= 6) ? (r.reason_description || 'Good for group dining') : r.reason_description,
   }));
 }
 

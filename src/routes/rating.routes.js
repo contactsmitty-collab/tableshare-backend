@@ -4,6 +4,7 @@ const ratingController = require('../controllers/ratingController');
 const { authenticateToken } = require('../middleware/auth');
 
 router.post('/', authenticateToken, ratingController.submitRating);
+router.post('/restaurant', authenticateToken, ratingController.submitRestaurantRating);
 router.get('/', authenticateToken, ratingController.getRatings);
 
 module.exports = router;

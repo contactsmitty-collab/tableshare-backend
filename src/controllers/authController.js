@@ -7,10 +7,40 @@ const { events } = require('../utils/events');
 const { getJwtSecret } = require('../config/env');
 
 const RESET_TOKEN_EXPIRY_HOURS = 1;
-const DEV_RETURN_RESET_TOKEN = process.env.DEV_RETURN_RESET_TOKEN === 'true';
+const DEV_RETURN_RESET_TOKEN = process.env.NODE_ENV !== 'production' && process.env.DEV_RETURN_RESET_TOKEN === 'true';
+
+const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_MAX_LENGTH = 128;
+
+/** Validate password strength; throws AppError if invalid. */
+function validatePasswordStrength(password, fieldName = 'Password') {
+  if (typeof password !== 'string') {
+    throw new AppError(`${fieldName} is required`, 400);
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new AppError(`${fieldName} must be at least ${MIN_PASSWORD_LENGTH} characters`, 400);
+  }
+  if (password.length > PASSWORD_MAX_LENGTH) {
+    throw new AppError(`${fieldName} must be at most ${PASSWORD_MAX_LENGTH} characters`, 400);
+  }
+  if (!/[A-Z]/.test(password)) {
+    throw new AppError(`${fieldName} must include at least one uppercase letter`, 400);
+  }
+  if (!/[a-z]/.test(password)) {
+    throw new AppError(`${fieldName} must include at least one lowercase letter`, 400);
+  }
+  if (!/[0-9]/.test(password)) {
+    throw new AppError(`${fieldName} must include at least one number`, 400);
+  }
+  if (!/[^A-Za-z0-9]/.test(password)) {
+    throw new AppError(`${fieldName} must include at least one special character`, 400);
+  }
+}
 
 const signup = asyncHandler(async (req, res) => {
   const { email, password, firstName, lastName, dateOfBirth } = req.body;
+
+  validatePasswordStrength(password, 'Password');
 
   const existingUser = await query('SELECT user_id FROM users WHERE email = $1', [email]);
   if (existingUser.rows.length > 0) {
@@ -29,7 +59,7 @@ const signup = asyncHandler(async (req, res) => {
   const user = result.rows[0];
   const token = jwt.sign(
     { userId: user.user_id, email: user.email },
-    process.env.JWT_SECRET || 'dev-secret-key',
+    getJwtSecret(),
     { expiresIn: '7d' }
   );
 
@@ -47,8 +77,6 @@ const signup = asyncHandler(async (req, res) => {
 
 const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
-  
-  console.log('Login attempt for:', email);
 
   const result = await query(
     'SELECT user_id, email, password_hash, first_name, last_name, role, is_admin, restaurant_id FROM users WHERE email = $1',
@@ -56,16 +84,12 @@ const login = asyncHandler(async (req, res) => {
   );
 
   if (result.rows.length === 0) {
-    console.log('User not found:', email);
     throw new AppError('Invalid credentials', 401);
   }
 
   const user = result.rows[0];
-  console.log('User found, comparing password. Hash length:', user.password_hash?.length);
-  
   const validPassword = await bcrypt.compare(password, user.password_hash);
-  console.log('Password valid:', validPassword);
-  
+
   if (!validPassword) {
     throw new AppError('Invalid credentials', 401);
   }
@@ -158,9 +182,7 @@ const resetPassword = asyncHandler(async (req, res) => {
   if (!token || typeof token !== 'string') {
     throw new AppError('Reset token is required', 400);
   }
-  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
-    throw new AppError('Password must be at least 8 characters', 400);
-  }
+  validatePasswordStrength(newPassword, 'New password');
 
   const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
 

@@ -11,9 +11,12 @@ const getAllUsers = asyncHandler(async (req, res) => {
   let paramCount = 1;
 
   if (search) {
-    queryText += ` WHERE email ILIKE $${paramCount} OR first_name ILIKE $${paramCount} OR last_name ILIKE $${paramCount}`;
-    queryParams.push(`%${search}%`);
-    paramCount++;
+    const searchTrimmed = String(search).trim().slice(0, 200);
+    if (searchTrimmed) {
+      queryText += ` WHERE email ILIKE $${paramCount} OR first_name ILIKE $${paramCount} OR last_name ILIKE $${paramCount}`;
+      queryParams.push(`%${searchTrimmed}%`);
+      paramCount++;
+    }
   }
 
   queryText += ` ORDER BY created_at DESC LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
@@ -22,10 +25,11 @@ const getAllUsers = asyncHandler(async (req, res) => {
   const result = await query(queryText, queryParams);
 
   // Get total count
-  const countQuery = search 
+  const searchForCount = search ? String(search).trim().slice(0, 200) : '';
+  const countQuery = searchForCount
     ? `SELECT COUNT(*) as total FROM users WHERE email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1`
     : 'SELECT COUNT(*) as total FROM users';
-  const countParams = search ? [`%${search}%`] : [];
+  const countParams = searchForCount ? [`%${searchForCount}%`] : [];
   const countResult = await query(countQuery, countParams);
 
   res.json({
@@ -283,7 +287,8 @@ const createUser = asyncHandler(async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const userRole = role || 'user';
+  const allowedRoles = ['user', 'admin', 'restaurant'];
+  const userRole = role && allowedRoles.includes(role) ? role : 'user';
   const isAdmin = userRole === 'admin';
 
   const result = await query(
@@ -321,7 +326,9 @@ const updateUser = asyncHandler(async (req, res) => {
     passwordHash = await bcrypt.hash(password, 10);
   }
 
-  const isAdmin = role === 'admin' ? true : (role ? false : undefined);
+  const allowedRoles = ['user', 'admin', 'restaurant'];
+  const sanitizedRole = role && allowedRoles.includes(role) ? role : undefined;
+  const isAdmin = sanitizedRole === 'admin' ? true : (sanitizedRole ? false : undefined);
 
   const result = await query(
     `UPDATE users SET
@@ -335,7 +342,7 @@ const updateUser = asyncHandler(async (req, res) => {
       updated_at = CURRENT_TIMESTAMP
     WHERE user_id = $8
     RETURNING user_id, email, first_name, last_name, role, is_admin, restaurant_id, created_at`,
-    [email, first_name, last_name, role, isAdmin, restaurant_id !== undefined ? restaurant_id : null, passwordHash, id]
+    [email, first_name, last_name, sanitizedRole, isAdmin, restaurant_id !== undefined ? restaurant_id : null, passwordHash, id]
   );
 
   res.json({

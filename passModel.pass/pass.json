@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "passTypeIdentifier": "pass.com.tableshare.app.reservation",
+  "teamIdentifier": "X5GH6NP66Z",
+  "organizationName": "TableShare",
+  "description": "Table reservation",
+  "eventTicket": {
+    "primaryFields": [],
+    "secondaryFields": [],
+    "auxiliaryFields": [],
+    "backFields": []
+  }
+}

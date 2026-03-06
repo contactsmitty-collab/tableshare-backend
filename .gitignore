@@ -6,3 +6,5 @@ android/build/
 *.jks
 *.keystore
 .DS_Store
+.env.local
+certs/*.pem

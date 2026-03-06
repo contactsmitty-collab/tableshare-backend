@@ -3,9 +3,9 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
-// Read-only data (accessible to authenticated restaurant managers too)
-router.get('/checkins', authenticateToken, adminController.getAllCheckIns);
-router.get('/ratings', authenticateToken, adminController.getAllRatings);
+// Read-only admin/manager data - require admin or restaurant manager (authorization in controller or requireAdmin)
+router.get('/checkins', authenticateToken, requireAdmin, adminController.getAllCheckIns);
+router.get('/ratings', authenticateToken, requireAdmin, adminController.getAllRatings);
 
 // Admin-only routes
 router.get('/stats', authenticateToken, requireAdmin, adminController.getPlatformStats);

@@ -28,4 +28,23 @@ const bioGenerateLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-module.exports = { authLimiter, reservationCreateLimiter, bioGenerateLimiter };
+// Public/unauthenticated endpoints (e.g. dining-lists signal) - limit per IP to prevent enumeration
+const publicSignalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Feedback: limit submissions per user to prevent spam
+const feedbackLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many feedback submissions. Please try again later.' },
+  keyGenerator: (req) => req.user?.userId || req.ip || 'anon',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = { authLimiter, reservationCreateLimiter, bioGenerateLimiter, publicSignalLimiter, feedbackLimiter };

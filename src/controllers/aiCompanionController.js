@@ -315,6 +315,38 @@ exports.getPreferences = async (req, res) => {
   }
 };
 
+exports.getAvatars = async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT avatar_id, display_name, personality_type, personality_blurb, portrait_url, thumbnail_url, gender_presentation, sort_order
+       FROM ai_avatars WHERE is_active = true ORDER BY sort_order, avatar_id`
+    );
+    const avatars = rows.map((r) => ({
+      avatarId: r.avatar_id,
+      avatar_id: r.avatar_id,
+      displayName: r.display_name,
+      display_name: r.display_name,
+      personalityType: r.personality_type,
+      personality_type: r.personality_type,
+      personalityBlurb: r.personality_blurb,
+      personality_blurb: r.personality_blurb,
+      thumbnailUrl: r.thumbnail_url,
+      thumbnail_url: r.thumbnail_url,
+      portraitUrl: r.portrait_url,
+      portrait_url: r.portrait_url,
+      genderPresentation: r.gender_presentation,
+      gender_presentation: r.gender_presentation,
+    }));
+    res.json({ avatars });
+  } catch (err) {
+    if (err.code === '42P01') {
+      return res.json({ avatars: [] });
+    }
+    console.error('getAvatars error:', err);
+    res.status(500).json({ error: 'Failed to load avatars' });
+  }
+};
+
 exports.updatePreferences = async (req, res) => {
   try {
     const userId = req.user.userId;

@@ -14,6 +14,7 @@ router.get('/suggestions', ai.getSuggestions);
 router.put('/suggestions/:messageId/used', ai.markSuggestionUsed);
 router.get('/preferences', ai.getPreferences);
 router.put('/preferences', ai.updatePreferences);
+router.get('/avatars', ai.getAvatars);
 router.post('/coaching', ai.getCoaching);
 router.get('/nudges', ai.getNudges);
 router.put('/nudges/:nudgeId/dismiss', ai.dismissNudge);

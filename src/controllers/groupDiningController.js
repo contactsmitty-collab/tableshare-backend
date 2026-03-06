@@ -265,6 +265,42 @@ const groupCheckIn = asyncHandler(async (req, res) => {
   });
 });
 
+// Check out group (leave restaurant so group no longer appears in "Groups here")
+const groupCheckOut = asyncHandler(async (req, res) => {
+  const userId = req.user?.userId || req.user?.user_id;
+  if (!userId) throw new AppError('Authentication required', 401);
+
+  const { groupId } = req.params;
+  if (!groupId) throw new AppError('Group ID is required', 400);
+
+  const groupRow = await query(
+    'SELECT group_id, checked_in_restaurant_id, group_name, created_by FROM dining_groups WHERE group_id = $1',
+    [groupId]
+  );
+  if (groupRow.rows.length === 0) throw new AppError('Group not found', 404);
+  const group = groupRow.rows[0];
+  if (!group.checked_in_restaurant_id) {
+    return res.json({ message: 'Group is not checked in anywhere' });
+  }
+
+  const isCreator = group.created_by && String(group.created_by) === String(userId);
+  const memberCheck = await query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, userId]
+  );
+  const isMember = memberCheck.rows.length > 0;
+  if (!isMember && !isCreator) throw new AppError('You are not a member of this group', 403);
+
+  await query(
+    'UPDATE dining_groups SET is_active = FALSE, checked_in_restaurant_id = NULL WHERE group_id = $1',
+    [groupId]
+  );
+
+  res.json({
+    message: `${group.group_name} has checked out. You no longer appear in "Groups here" at this restaurant.`,
+  });
+});
+
 // Discover groups at the same restaurant (includes user's own groups with is_member flag)
 const discoverGroupsAtRestaurant = asyncHandler(async (req, res) => {
   const { restaurantId } = req.params;
@@ -401,6 +437,147 @@ const getGroupDetails = asyncHandler(async (req, res) => {
   });
 });
 
+// ─── Scheduled group dinner (group events) ───
+
+const createGroupEvent = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { groupId } = req.params;
+  const { restaurant_id: restaurantId, proposed_date: proposedDate, proposed_time: proposedTime, title, notes } = req.body;
+
+  const memberCheck = await query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, userId]
+  );
+  if (memberCheck.rows.length === 0) throw new AppError('You are not a member of this group', 403);
+  if (!restaurantId || !proposedDate) throw new AppError('restaurant_id and proposed_date are required', 400);
+
+  const insert = await query(
+    `INSERT INTO group_events (group_id, restaurant_id, proposed_date, proposed_time, created_by, title, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING event_id, group_id, restaurant_id, proposed_date, proposed_time, created_by, status, title, notes, created_at`,
+    [groupId, restaurantId, proposedDate, proposedTime || null, userId, title || null, notes || null]
+  );
+  const event = insert.rows[0];
+
+  const members = await query('SELECT user_id FROM group_members WHERE group_id = $1', [groupId]);
+  for (const m of members.rows) {
+    await query(
+      'INSERT INTO group_event_rsvps (event_id, user_id, status) VALUES ($1, $2, $3) ON CONFLICT (event_id, user_id) DO NOTHING',
+      [event.event_id, m.user_id, m.user_id === userId ? 'going' : 'pending']
+    );
+    if (m.user_id !== userId) {
+      const groupRow = await query('SELECT group_name FROM dining_groups WHERE group_id = $1', [groupId]);
+      const restRow = await query('SELECT name FROM restaurants WHERE restaurant_id = $1', [restaurantId]);
+      const creatorRow = await query('SELECT first_name FROM users WHERE user_id = $1', [userId]);
+      notificationService.sendToUser(
+        m.user_id,
+        'Group dinner scheduled',
+        `${creatorRow.rows[0]?.first_name || 'Someone'} scheduled a group dinner at ${restRow.rows[0]?.name || 'a restaurant'} for ${proposedDate}. Open the app to RSVP.`,
+        { type: 'group_event', eventId: event.event_id, groupId }
+      ).catch(() => {});
+    }
+  }
+
+  const restResult = await query('SELECT name FROM restaurants WHERE restaurant_id = $1', [restaurantId]);
+  res.status(201).json({
+    message: 'Group dinner scheduled',
+    event: {
+      ...event,
+      restaurant_name: restResult.rows[0]?.name,
+    },
+  });
+});
+
+const getMyGroupEvents = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { upcoming } = req.query;
+
+  let whereClause = `EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_id = ge.group_id AND gm.user_id = $1)`;
+  const params = [userId];
+  if (upcoming === 'true') {
+    whereClause += ` AND ge.proposed_date >= CURRENT_DATE AND ge.status = 'scheduled'`;
+  }
+
+  const result = await query(
+    `SELECT ge.event_id, ge.group_id, ge.restaurant_id, ge.proposed_date, ge.proposed_time, ge.created_by, ge.status, ge.title, ge.notes, ge.created_at,
+            dg.group_name, r.name as restaurant_name,
+            (SELECT status FROM group_event_rsvps WHERE event_id = ge.event_id AND user_id = $1) as my_rsvp
+     FROM group_events ge
+     JOIN dining_groups dg ON ge.group_id = dg.group_id
+     JOIN restaurants r ON ge.restaurant_id = r.restaurant_id
+     WHERE ${whereClause}
+     ORDER BY ge.proposed_date ASC, ge.proposed_time ASC NULLS LAST`,
+    params
+  );
+  res.json({ events: result.rows });
+});
+
+const getGroupEventDetail = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { eventId } = req.params;
+
+  const eventResult = await query(
+    `SELECT ge.*, dg.group_name, r.name as restaurant_name, r.address as restaurant_address,
+            u.first_name || ' ' || u.last_name as creator_name
+     FROM group_events ge
+     JOIN dining_groups dg ON ge.group_id = dg.group_id
+     JOIN restaurants r ON ge.restaurant_id = r.restaurant_id
+     JOIN users u ON ge.created_by = u.user_id
+     WHERE ge.event_id = $1`,
+    [eventId]
+  );
+  if (eventResult.rows.length === 0) throw new AppError('Event not found', 404);
+
+  const memberCheck = await query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [eventResult.rows[0].group_id, userId]
+  );
+  if (memberCheck.rows.length === 0) throw new AppError('You are not in this group', 403);
+
+  const rsvps = await query(
+    `SELECT ger.user_id, ger.status, ger.responded_at, u.first_name, u.last_name, u.profile_photo_url
+     FROM group_event_rsvps ger
+     JOIN users u ON ger.user_id = u.user_id
+     WHERE ger.event_id = $1
+     ORDER BY ger.responded_at ASC`,
+    [eventId]
+  );
+
+  res.json({
+    event: eventResult.rows[0],
+    rsvps: rsvps.rows,
+  });
+});
+
+const rsvpToGroupEvent = asyncHandler(async (req, res) => {
+  const userId = req.user.userId;
+  const { eventId } = req.params;
+  const { status } = req.body;
+
+  if (!status || !['going', 'not_going', 'pending'].includes(status)) {
+    throw new AppError('status must be going, not_going, or pending', 400);
+  }
+
+  const eventRow = await query(
+    'SELECT group_id FROM group_events WHERE event_id = $1',
+    [eventId]
+  );
+  if (eventRow.rows.length === 0) throw new AppError('Event not found', 404);
+
+  const memberCheck = await query(
+    'SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [eventRow.rows[0].group_id, userId]
+  );
+  if (memberCheck.rows.length === 0) throw new AppError('You are not in this group', 403);
+
+  await query(
+    `INSERT INTO group_event_rsvps (event_id, user_id, status) VALUES ($1, $2, $3)
+     ON CONFLICT (event_id, user_id) DO UPDATE SET status = $3, responded_at = NOW()`,
+    [eventId, userId, status]
+  );
+  res.json({ message: 'RSVP updated', status });
+});
+
 module.exports = {
   searchUsers,
   createGroup,
@@ -409,8 +586,13 @@ module.exports = {
   respondToInvite,
   getMyInvites,
   groupCheckIn,
+  groupCheckOut,
   discoverGroupsAtRestaurant,
   inviteGroup,
   getGroupInvites,
   getGroupDetails,
+  createGroupEvent,
+  getMyGroupEvents,
+  getGroupEventDetail,
+  rsvpToGroupEvent,
 };

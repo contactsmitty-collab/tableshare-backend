@@ -24,6 +24,8 @@ const getMyMatches = asyncHandler(async (req, res) => {
      LEFT JOIN users u2 ON m.receiver_id = u2.user_id
      WHERE (m.requester_id = $1 OR m.receiver_id = $1)
        AND m.status IN ('accepted', 'completed')
+       AND (CASE WHEN m.requester_id = $1 THEN m.receiver_id ELSE m.requester_id END) NOT IN
+           (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
      ORDER BY m.created_at DESC`,
     [userId]
   );
@@ -465,6 +467,12 @@ const getSmartMatches = asyncHandler(async (req, res) => {
          UNION
          SELECT receiver_id FROM matches WHERE requester_id = $1 AND status IN ('pending', 'accepted', 'rejected')
        )
+       AND u.user_id NOT IN (
+         SELECT blocked_id FROM user_blocks WHERE blocker_id = $1
+         UNION
+         SELECT blocker_id FROM user_blocks WHERE blocked_id = $1
+       )
+       AND COALESCE(u.hide_from_discover, false) = false
        ${locationFilter}
        AND EXISTS (
          SELECT 1 FROM check_ins WHERE user_id = u.user_id AND check_in_time > NOW() - INTERVAL '30 days'

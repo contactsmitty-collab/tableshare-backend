@@ -1,0 +1,2 @@
+# Copy signerCert.pem, signerKey.pem, and AppleWWDRCA.pem here.
+# Do not commit .pem files (they are in .gitignore).

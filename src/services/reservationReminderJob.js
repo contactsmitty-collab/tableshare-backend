@@ -79,4 +79,54 @@ async function runReservationReminders() {
   }
 }
 
-module.exports = { runReservationReminders };
+/** Group event reminders: 24h before scheduled group dinner. Sends to all group members. */
+async function runGroupEventReminders() {
+  try {
+    await db.query('ALTER TABLE group_events ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP WITH TIME ZONE').catch(() => {});
+
+    const events = await db.query(
+      `SELECT ge.event_id, ge.group_id, ge.proposed_date, ge.proposed_time,
+              dg.group_name, r.name as restaurant_name
+       FROM group_events ge
+       JOIN dining_groups dg ON dg.group_id = ge.group_id
+       JOIN restaurants r ON r.restaurant_id = ge.restaurant_id
+       WHERE ge.proposed_date = CURRENT_DATE + INTERVAL '1 day'
+         AND ge.status = 'scheduled'
+         AND ge.reminder_sent_at IS NULL`
+    ).catch(() => ({ rows: [] }));
+
+    let sent = 0;
+    for (const ev of events.rows || []) {
+      const members = await db.query(
+        'SELECT user_id FROM group_members WHERE group_id = $1',
+        [ev.group_id]
+      ).catch(() => ({ rows: [] }));
+      for (const m of members.rows || []) {
+        try {
+          await notificationService.sendGroupEventReminder(
+            m.user_id,
+            ev.restaurant_name,
+            ev.proposed_date,
+            ev.proposed_time,
+            ev.event_id,
+            ev.group_name
+          );
+          sent++;
+        } catch (err) {
+          logger.error('Group event reminder send failed', { eventId: ev.event_id, userId: m.user_id, err: err.message });
+        }
+      }
+      await db.query(
+        'UPDATE group_events SET reminder_sent_at = NOW() WHERE event_id = $1',
+        [ev.event_id]
+      ).catch(() => {});
+    }
+    if (sent > 0) logger.info(`Group event reminders sent: ${sent}`);
+    return { groupEventReminders: sent };
+  } catch (err) {
+    logger.error('Group event reminder job failed', err);
+    return { groupEventReminders: 0 };
+  }
+}
+
+module.exports = { runReservationReminders, runGroupEventReminders };

@@ -19,12 +19,10 @@ function getApiBaseUrl() {
     if (hostname === 'localhost' || hostname === '127.0.0.1' || protocol === 'file:') {
         // Local development
         apiUrl = 'http://localhost:3000/api/v1';
-    } else if (hostname === '165.227.179.81') {
-        // Server IP
-        apiUrl = `http://${hostname}:3000/api/v1`;
     } else {
-        // Production domain - use same host with /api/v1
-        apiUrl = `${protocol}//${hostname}${port && port !== '80' && port !== '443' ? ':' + port : ''}/api/v1`;
+        // Production: use same protocol as the page (HTTPS recommended). No hardcoded IPs.
+        const base = `${protocol}//${hostname}${port && port !== '80' && port !== '443' ? ':' + port : ''}`;
+        apiUrl = base + '/api/v1';
     }
     
     console.log('🔗 API URL:', apiUrl);

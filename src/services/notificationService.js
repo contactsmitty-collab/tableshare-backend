@@ -89,6 +89,23 @@ const notificationService = {
     }
   },
 
+  // Check if user has this notification category enabled (default true if no row)
+  async isCategoryEnabled(userId, category) {
+    const valid = ['matches', 'messages', 'reservations', 'promotions'];
+    if (!valid.includes(category)) return true;
+    try {
+      const result = await db.query(
+        'SELECT ' + category + ' FROM user_notification_preferences WHERE user_id = $1',
+        [userId]
+      );
+      if (result.rows.length === 0) return true;
+      return result.rows[0][category] !== false;
+    } catch (error) {
+      logger.error('Error checking notification preference:', error);
+      return true;
+    }
+  },
+
   // Send notification to a specific user
   async sendToUser(userId, title, body, data = {}) {
     if (!firebaseInitialized) {
@@ -149,6 +166,8 @@ const notificationService = {
 
   // Send new match notification
   async sendMatchNotification(userId, matchedUserName, restaurantName) {
+    const allowed = await this.isCategoryEnabled(userId, 'matches');
+    if (!allowed) return false;
     return this.sendToUser(
       userId,
       'New Match!',
@@ -159,6 +178,8 @@ const notificationService = {
 
   // Send new message notification
   async sendMessageNotification(userId, senderName, messagePreview) {
+    const allowed = await this.isCategoryEnabled(userId, 'messages');
+    if (!allowed) return false;
     const preview = messagePreview.length > 50
       ? messagePreview.substring(0, 47) + '...'
       : messagePreview;
@@ -183,6 +204,8 @@ const notificationService = {
 
   // Send reservation confirmation (right after booking)
   async sendReservationConfirmation(userId, restaurantName, reservationDate, reservationTime, partySize, confirmationCode) {
+    const allowed = await this.isCategoryEnabled(userId, 'reservations');
+    if (!allowed) return false;
     const timeStr = typeof reservationTime === 'string' ? reservationTime.slice(0, 5) : String(reservationTime).slice(0, 5);
     return this.sendToUser(
       userId,
@@ -194,6 +217,8 @@ const notificationService = {
 
   // Send reservation reminder (24h or 1h before)
   async sendReservationReminder(userId, restaurantName, reservationDate, reservationTime, reservationId, hoursAhead) {
+    const allowed = await this.isCategoryEnabled(userId, 'reservations');
+    if (!allowed) return false;
     const timeStr = typeof reservationTime === 'string' ? reservationTime.slice(0, 5) : String(reservationTime).slice(0, 5);
     const when = hoursAhead === 1 ? 'in 1 hour' : 'tomorrow';
     return this.sendToUser(
@@ -201,6 +226,34 @@ const notificationService = {
       'Reminder: Your reservation',
       `Your table at ${restaurantName} is ${when} at ${timeStr}.`,
       { type: 'reservation_reminder', screen: 'Reservations', reservationId: String(reservationId) }
+    );
+  },
+
+  // Send event-at-list notification (restaurant on user's list has an upcoming event)
+  async sendEventAtListNotification(userId, restaurantName, eventTitle, restaurantId) {
+    const allowed = await this.isCategoryEnabled(userId, 'promotions');
+    if (!allowed) return false;
+    return this.sendToUser(
+      userId,
+      'Event at a spot you saved',
+      `${eventTitle} at ${restaurantName}`,
+      { type: 'event_at_list', screen: 'RestaurantDetail', restaurantId: String(restaurantId) }
+    );
+  },
+
+  // Send group dinner reminder (24h before scheduled group event)
+  async sendGroupEventReminder(userId, restaurantName, proposedDate, proposedTime, eventId, groupName) {
+    const allowed = await this.isCategoryEnabled(userId, 'reservations');
+    if (!allowed) return false;
+    const timeStr = proposedTime ? (typeof proposedTime === 'string' ? proposedTime.slice(0, 5) : String(proposedTime).slice(0, 5)) : '';
+    const body = timeStr
+      ? `Group dinner at ${restaurantName} tomorrow at ${timeStr}. Open the app to RSVP or see details.`
+      : `Group dinner at ${restaurantName} tomorrow. Open the app to see details.`;
+    return this.sendToUser(
+      userId,
+      groupName ? `Reminder: ${groupName}` : 'Reminder: Group dinner',
+      body,
+      { type: 'group_event_reminder', screen: 'Upcoming', eventId: String(eventId) }
     );
   },
 };
