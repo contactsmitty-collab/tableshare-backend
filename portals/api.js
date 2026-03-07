@@ -217,6 +217,11 @@ const api = {
         return data.stats || data;
     },
 
+    async getStatsTrends(metric = 'checkins', days = 30) {
+        const data = await this.request(`/admin/stats/trends?metric=${encodeURIComponent(metric)}&days=${days}`);
+        return data;
+    },
+
     async getCheckins(restaurantId = null) {
         const endpoint = restaurantId ? `/admin/checkins?restaurant_id=${restaurantId}` : '/admin/checkins';
         const data = await this.request(endpoint);
@@ -227,5 +232,58 @@ const api = {
         const endpoint = restaurantId ? `/admin/ratings?restaurant_id=${restaurantId}` : '/admin/ratings';
         const data = await this.request(endpoint);
         return Array.isArray(data) ? data : data.ratings || [];
+    },
+
+    async getReports(params = {}) {
+        const qs = new URLSearchParams();
+        if (params.status) qs.set('status', params.status);
+        if (params.target_type) qs.set('target_type', params.target_type);
+        if (params.limit) qs.set('limit', params.limit);
+        if (params.offset) qs.set('offset', params.offset);
+        const endpoint = `/admin/reports${qs.toString() ? '?' + qs : ''}`;
+        const data = await this.request(endpoint);
+        return data;
+    },
+
+    async updateReport(id, updates) {
+        return await this.request(`/admin/reports/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(updates)
+        });
+    },
+
+    async getPromotions(restaurantId) {
+        const data = await this.request(`/admin/restaurants/${restaurantId}/promotions`);
+        return data.promotions || [];
+    },
+
+    async createPromotion(restaurantId, promo) {
+        return await this.request(`/admin/restaurants/${restaurantId}/promotions`, {
+            method: 'POST',
+            body: JSON.stringify(promo)
+        });
+    },
+
+    async updatePromotion(restaurantId, promoId, updates) {
+        return await this.request(`/admin/restaurants/${restaurantId}/promotions/${promoId}`, {
+            method: 'PATCH',
+            body: JSON.stringify(updates)
+        });
+    },
+
+    async deletePromotion(restaurantId, promoId) {
+        return await this.request(`/admin/restaurants/${restaurantId}/promotions/${promoId}`, {
+            method: 'DELETE'
+        });
+    },
+
+    async getBlocks() {
+        const data = await this.request('/admin/blocks');
+        return data;
+    },
+
+    async getWaitlist(restaurantId) {
+        const data = await this.request(`/admin/restaurants/${restaurantId}/waitlist`);
+        return data.waitlist || [];
     }
 };

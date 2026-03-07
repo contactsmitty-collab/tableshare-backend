@@ -33,6 +33,7 @@ const AdminDashboard = {
             restaurants: 'Restaurants',
             analytics: 'Analytics',
             reports: 'Safety Reports',
+            blocks: 'Blocked Users',
             settings: 'Settings'
         };
 
@@ -41,7 +42,8 @@ const AdminDashboard = {
             users: 'Manage all users',
             restaurants: 'Manage partner restaurants',
             analytics: 'Platform-wide analytics',
-            reports: 'Review and manage safety reports'
+            reports: 'Review and manage safety reports',
+            blocks: 'Platform-wide block list for support'
         };
 
         document.getElementById('admin-section-title').textContent = titles[section] || section;
@@ -55,6 +57,9 @@ const AdminDashboard = {
             case 'restaurants': this.loadRestaurants(); break;
             case 'users': this.loadUsers(); break;
             case 'analytics': this.loadAnalytics(); break;
+            case 'reports': this.loadReports(); break;
+            case 'blocks': this.loadBlockedUsers(); break;
+            case 'settings': this.loadSettings(); break;
             default:
                 contentDiv.innerHTML = `
                     <div class="card" style="text-align: center; padding: 60px 24px;">
@@ -90,7 +95,7 @@ const AdminDashboard = {
                                 <div class="kpi-label">Active Users</div>
                                 <div class="kpi-value" style="font-family:var(--mono);">${formatNumber(activeUsers)}</div>
                                 <div class="kpi-change">
-                                    <span class="kpi-change-value positive">↑ 12%</span>
+                                    <span class="kpi-change-value ${(stats.active_users_delta_pct || 0) >= 0 ? 'positive' : 'negative'}">${(stats.active_users_delta_pct || 0) >= 0 ? '↑' : '↓'} ${Math.abs(stats.active_users_delta_pct || 0)}%</span>
                                     <span class="kpi-change-label">vs last month</span>
                                 </div>
                             </div>
@@ -108,7 +113,7 @@ const AdminDashboard = {
                                 <div class="kpi-label">Matches Today</div>
                                 <div class="kpi-value" style="font-family:var(--mono);">${formatNumber(totalMatches)}</div>
                                 <div class="kpi-change">
-                                    <span class="kpi-change-value positive">↑ 8%</span>
+                                    <span class="kpi-change-value ${(stats.matches_delta_pct || 0) >= 0 ? 'positive' : 'negative'}">${(stats.matches_delta_pct || 0) >= 0 ? '↑' : '↓'} ${Math.abs(stats.matches_delta_pct || 0)}%</span>
                                     <span class="kpi-change-label">vs last week</span>
                                 </div>
                             </div>
@@ -126,7 +131,7 @@ const AdminDashboard = {
                                 <div class="kpi-label">Restaurants Live</div>
                                 <div class="kpi-value" style="font-family:var(--mono);">${formatNumber(totalRestaurants)}</div>
                                 <div class="kpi-change">
-                                    <span class="kpi-change-value positive">+${Math.min(3, totalRestaurants)}</span>
+                                    <span class="kpi-change-value positive">+${stats.restaurants_delta_this_week ?? 0}</span>
                                     <span class="kpi-change-label">this week</span>
                                 </div>
                             </div>
@@ -144,7 +149,7 @@ const AdminDashboard = {
                                 <div class="kpi-label">Check-ins Today</div>
                                 <div class="kpi-value" style="font-family:var(--mono);">${formatNumber(totalCheckins)}</div>
                                 <div class="kpi-change">
-                                    <span class="kpi-change-value positive">↑ 23%</span>
+                                    <span class="kpi-change-value ${(stats.check_ins_delta_pct || 0) >= 0 ? 'positive' : 'negative'}">${(stats.check_ins_delta_pct || 0) >= 0 ? '↑' : '↓'} ${Math.abs(stats.check_ins_delta_pct || 0)}%</span>
                                     <span class="kpi-change-label">vs last week</span>
                                 </div>
                             </div>
@@ -218,17 +223,29 @@ const AdminDashboard = {
                 </div>
             `;
 
-            setTimeout(() => {
+            setTimeout(async () => {
                 if (typeof ChartUtils !== 'undefined' && ChartUtils.createSparkline) {
-                    ChartUtils.createSparkline('kpi-sparkline-users', ChartUtils.generateTrendData(12, 10, 50), 'var(--blue)');
-                    ChartUtils.createSparkline('kpi-sparkline-matches', ChartUtils.generateTrendData(12, 5, 30), 'var(--green)');
-                    ChartUtils.createSparkline('kpi-sparkline-restaurants', ChartUtils.generateTrendData(12, 8, 20), 'var(--accent)');
-                    ChartUtils.createSparkline('kpi-sparkline-checkins', ChartUtils.generateTrendData(12, 3, 25), 'var(--purple)');
-                    ChartUtils.createMiniBarChart('admin-weekly-checkins',
-                        ChartUtils.generateTrendData(7, 2, 18),
-                        ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-                        'var(--accent)'
-                    );
+                    try {
+                        const [usersTrend, checkinsTrend, dowTrend] = await Promise.all([
+                            api.getStatsTrends('users', 14),
+                            api.getStatsTrends('checkins', 7),
+                            api.getStatsTrends('checkins_by_dow', 30)
+                        ]);
+                        const usersData = (usersTrend.data || []).slice(-12);
+                        const checkinsData = (checkinsTrend.data || []).slice(-7);
+                        ChartUtils.createSparkline('kpi-sparkline-users', usersData.length ? usersData : [0], 'var(--blue)');
+                        ChartUtils.createSparkline('kpi-sparkline-checkins', checkinsData.length ? checkinsData : [0], 'var(--purple)');
+                        ChartUtils.createSparkline('kpi-sparkline-matches', checkinsData.length ? checkinsData : [0], 'var(--green)');
+                        ChartUtils.createSparkline('kpi-sparkline-restaurants', checkinsData.length ? checkinsData : [0], 'var(--accent)');
+                        const dowData = dowTrend.data || [0, 0, 0, 0, 0, 0, 0];
+                        ChartUtils.createMiniBarChart('admin-weekly-checkins', dowData, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], 'var(--accent)');
+                    } catch (e) {
+                        ChartUtils.createSparkline('kpi-sparkline-users', [0], 'var(--blue)');
+                        ChartUtils.createSparkline('kpi-sparkline-matches', [0], 'var(--green)');
+                        ChartUtils.createSparkline('kpi-sparkline-restaurants', [0], 'var(--accent)');
+                        ChartUtils.createSparkline('kpi-sparkline-checkins', [0], 'var(--purple)');
+                        ChartUtils.createMiniBarChart('admin-weekly-checkins', [0, 0, 0, 0, 0, 0, 0], ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], 'var(--accent)');
+                    }
                 }
             }, 50);
 
@@ -321,6 +338,13 @@ const AdminDashboard = {
                 <div class="form-group"><label>Website</label><input type="url" id="rest-website" placeholder="https://"></div>
             </div>
             <div class="form-group"><label>Description</label><textarea id="rest-description" rows="3"></textarea></div>
+            <div class="form-group">
+                <label>Noise Level</label>
+                <select id="rest-noise"><option value="">Select</option><option value="quiet">Quiet</option><option value="moderate">Moderate</option><option value="lively">Lively</option></select>
+            </div>
+            <div class="form-group"><label>TableShare Offer</label><textarea id="rest-tableshare-offer" rows="2" placeholder="e.g. Free appetizer for TableShare diners"></textarea></div>
+            <div class="form-group"><label>Menu URL</label><input type="url" id="rest-menu-url" placeholder="https://"></div>
+            <div class="form-group"><label>Specials</label><textarea id="rest-specials" rows="2" placeholder="Current specials or promotions"></textarea></div>
             <div class="form-group"><label>Hours of Operation</label><input type="text" id="rest-hours" placeholder="e.g. Mon-Sun: 9am-10pm"></div>
         `;
     },
@@ -352,6 +376,10 @@ const AdminDashboard = {
                     website: document.getElementById('rest-website').value || null,
                     description: document.getElementById('rest-description').value || null,
                     hours: document.getElementById('rest-hours').value || null,
+                    noise_level: document.getElementById('rest-noise').value || null,
+                    tableshare_offer: document.getElementById('rest-tableshare-offer').value || null,
+                    menu_url: document.getElementById('rest-menu-url').value || null,
+                    specials: document.getElementById('rest-specials').value || null,
                 });
                 closeModal();
                 showToast('Restaurant created successfully!', 'success');
@@ -383,6 +411,10 @@ const AdminDashboard = {
         document.getElementById('rest-phone').value = r.phone || '';
         document.getElementById('rest-website').value = r.website || '';
         document.getElementById('rest-description').value = r.description || '';
+        document.getElementById('rest-noise').value = r.noise_level || '';
+        document.getElementById('rest-tableshare-offer').value = r.tableshare_offer || '';
+        document.getElementById('rest-menu-url').value = r.menu_url || '';
+        document.getElementById('rest-specials').value = r.specials || '';
         document.getElementById('rest-hours').value = r.hours || '';
 
         document.getElementById('edit-restaurant-form').addEventListener('submit', async (e) => {
@@ -392,13 +424,18 @@ const AdminDashboard = {
             try {
                 await api.updateRestaurant(restaurantId, {
                     name: document.getElementById('rest-name').value,
-                    cuisine: document.getElementById('rest-cuisine').value || null,
+                    city: document.getElementById('rest-city').value || null,
+                    cuisine_type: document.getElementById('rest-cuisine').value || null,
                     address: document.getElementById('rest-address').value || null,
                     price_range: document.getElementById('rest-price').value || null,
                     phone: document.getElementById('rest-phone').value || null,
                     website: document.getElementById('rest-website').value || null,
                     description: document.getElementById('rest-description').value || null,
                     hours: document.getElementById('rest-hours').value || null,
+                    noise_level: document.getElementById('rest-noise').value || null,
+                    tableshare_offer: document.getElementById('rest-tableshare-offer').value || null,
+                    menu_url: document.getElementById('rest-menu-url').value || null,
+                    specials: document.getElementById('rest-specials').value || null,
                 });
                 closeModal();
                 showToast('Restaurant updated successfully!', 'success');
@@ -640,10 +677,12 @@ const AdminDashboard = {
 
     async loadAnalytics() {
         try {
-            const [stats, checkins, ratings] = await Promise.all([
+            const [stats, checkins, ratings, checkinsTrend, usersTrend] = await Promise.all([
                 api.getStats(),
                 api.getCheckins(),
-                api.getRatings()
+                api.getRatings(),
+                api.getStatsTrends('checkins', 30),
+                api.getStatsTrends('users', 30)
             ]);
 
             const contentDiv = document.getElementById('admin-content');
@@ -701,12 +740,15 @@ const AdminDashboard = {
             `;
 
             setTimeout(() => {
-                const labels = ChartUtils.getDateLabels(30);
+                const checkLabels = checkinsTrend.labels || ChartUtils.getDateLabels(30);
+                const checkData = checkinsTrend.data || [];
+                const userLabels = usersTrend.labels || ChartUtils.getDateLabels(30);
+                const userData = usersTrend.data || [];
                 ChartUtils.createLineChart('admin-checkins-chart', {
-                    labels,
+                    labels: checkLabels,
                     datasets: [{
                         label: 'Check-ins',
-                        data: ChartUtils.generateTrendData(30, 0, 30),
+                        data: checkData.length ? checkData : [0],
                         borderColor: '#E8553D',
                         backgroundColor: 'rgba(232,85,61,0.08)',
                         tension: 0.4,
@@ -714,10 +756,10 @@ const AdminDashboard = {
                     }]
                 });
                 ChartUtils.createLineChart('admin-users-chart', {
-                    labels,
+                    labels: userLabels,
                     datasets: [{
                         label: 'New Users',
-                        data: ChartUtils.generateTrendData(30, 0, 10),
+                        data: userData.length ? userData : [0],
                         borderColor: '#0D9F6E',
                         backgroundColor: 'rgba(13,159,110,0.08)',
                         tension: 0.4,
@@ -727,6 +769,196 @@ const AdminDashboard = {
             }, 100);
 
         } catch (error) { this.showError(error.message); }
+    },
+
+    _reportsFilterStatus: '',
+    _reportsFilterTargetType: '',
+    async loadReports() {
+        try {
+            const params = {};
+            if (this._reportsFilterStatus) params.status = this._reportsFilterStatus;
+            if (this._reportsFilterTargetType) params.target_type = this._reportsFilterTargetType;
+            const data = await api.getReports(params);
+            const reports = data.reports || [];
+            this._reports = reports;
+            const total = data.total ?? reports.length;
+
+            const contentDiv = document.getElementById('admin-content');
+            contentDiv.innerHTML = `
+                <div class="data-panel">
+                    <div class="data-panel-header" style="flex-wrap:wrap;gap:12px;">
+                        <span class="data-panel-title">Safety Reports (${total})</span>
+                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                            <button class="btn btn-secondary btn-sm" onclick="AdminDashboard._exportReportsToCSV()">Export CSV</button>
+                            <select id="reports-filter-status" style="padding:6px 10px;border-radius:var(--radius-sm);font-size:13px;border:1px solid var(--border);background:var(--bg);">
+                                <option value="">All statuses</option>
+                                <option value="pending" ${this._reportsFilterStatus === 'pending' ? 'selected' : ''}>Pending</option>
+                                <option value="reviewed" ${this._reportsFilterStatus === 'reviewed' ? 'selected' : ''}>Reviewed</option>
+                                <option value="dismissed" ${this._reportsFilterStatus === 'dismissed' ? 'selected' : ''}>Dismissed</option>
+                                <option value="action_taken" ${this._reportsFilterStatus === 'action_taken' ? 'selected' : ''}>Action taken</option>
+                            </select>
+                            <select id="reports-filter-target" style="padding:6px 10px;border-radius:var(--radius-sm);font-size:13px;border:1px solid var(--border);background:var(--bg);">
+                                <option value="">All types</option>
+                                <option value="user" ${this._reportsFilterTargetType === 'user' ? 'selected' : ''}>User</option>
+                                <option value="restaurant" ${this._reportsFilterTargetType === 'restaurant' ? 'selected' : ''}>Restaurant</option>
+                                <option value="message" ${this._reportsFilterTargetType === 'message' ? 'selected' : ''}>Message</option>
+                            </select>
+                            <button class="btn btn-primary btn-sm" onclick="AdminDashboard._applyReportsFilters()">Apply</button>
+                        </div>
+                    </div>
+                    <div class="data-row data-row-header" style="grid-template-columns:1fr 1fr 80px 2fr 100px 120px;">
+                        <div class="data-cell">Reporter</div>
+                        <div class="data-cell">Target</div>
+                        <div class="data-cell">Reason</div>
+                        <div class="data-cell">Details</div>
+                        <div class="data-cell">Status</div>
+                        <div class="data-cell" style="text-align:right;">Actions</div>
+                    </div>
+                    <div id="reports-table-body">
+                        ${this._renderReportRows(reports)}
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('reports-filter-status').addEventListener('change', (e) => {
+                this._reportsFilterStatus = e.target.value || '';
+            });
+            document.getElementById('reports-filter-target').addEventListener('change', (e) => {
+                this._reportsFilterTargetType = e.target.value || '';
+            });
+        } catch (error) {
+            this.showError(error.message);
+        }
+    },
+
+    _applyReportsFilters() {
+        this.loadReports();
+    },
+
+    _renderReportRows(reports) {
+        if (!reports.length) {
+            return `<div class="data-row" style="grid-template-columns:1fr;padding:24px;text-align:center;color:var(--text-secondary);">No reports found.</div>`;
+        }
+        return reports.map(r => {
+            const reporter = [r.reporter_first_name, r.reporter_last_name].filter(Boolean).join(' ') || r.reporter_email || '—';
+            const target = `${r.target_type || '—'} #${r.target_id || '—'}`;
+            const statusBadge = r.status === 'pending' ? 'badge-warning' : (r.status === 'reviewed' || r.status === 'action_taken' ? 'badge-active' : 'badge-completed');
+            const reviewedAt = r.reviewed_at ? new Date(r.reviewed_at).toLocaleDateString() : '';
+            return `
+                <div class="data-row" style="grid-template-columns:1fr 1fr 80px 2fr 100px 120px;">
+                    <div class="data-cell">${reporter}</div>
+                    <div class="data-cell mono" style="font-size:12px;">${target}</div>
+                    <div class="data-cell" style="font-size:12px;">${(r.reason || '—').slice(0, 20)}</div>
+                    <div class="data-cell" style="font-size:12px;color:var(--text-secondary);max-width:200px;overflow:hidden;text-overflow:ellipsis;">${(r.details || '—').replace(/</g, '&lt;').slice(0, 80)}</div>
+                    <div class="data-cell"><span class="badge ${statusBadge}">${(r.status || 'pending')}</span>${reviewedAt ? '<br><small style="font-size:10px;color:var(--text-secondary);">' + reviewedAt + '</small>' : ''}</div>
+                    <div class="data-cell" style="text-align:right;">
+                        ${r.status === 'pending' ? `<button class="btn btn-primary btn-sm" onclick="AdminDashboard._markReportReviewed('${r.id}')">Mark reviewed</button>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    },
+
+    async _markReportReviewed(reportId) {
+        try {
+            await api.updateReport(reportId, { status: 'reviewed' });
+            showToast('Report marked as reviewed', 'success');
+            this.loadReports();
+        } catch (error) {
+            showToast('Error: ' + error.message, 'error');
+        }
+    },
+
+    _exportReportsToCSV() {
+        const reports = this._reports || [];
+        const headers = ['ID', 'Reporter', 'Reporter Email', 'Target Type', 'Target ID', 'Reason', 'Details', 'Status', 'Reviewed At', 'Created At'];
+        const rows = reports.map(r => {
+            const reporter = [r.reporter_first_name, r.reporter_last_name].filter(Boolean).join(' ') || r.reporter_email || '';
+            return [
+                r.id,
+                `"${(reporter || '').replace(/"/g, '""')}"`,
+                `"${(r.reporter_email || '').replace(/"/g, '""')}"`,
+                r.target_type || '',
+                r.target_id || '',
+                `"${(r.reason || '').replace(/"/g, '""')}"`,
+                `"${(r.details || '').replace(/"/g, '""')}"`,
+                r.status || '',
+                r.reviewed_at ? new Date(r.reviewed_at).toISOString() : '',
+                r.created_at ? new Date(r.created_at).toISOString() : ''
+            ];
+        });
+        const csv = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `tableshare-reports-${new Date().toISOString().slice(0, 10)}.csv`;
+        link.click();
+        window.URL.revokeObjectURL(url);
+        showToast('Reports exported', 'success');
+    },
+
+    async loadBlockedUsers() {
+        try {
+            const data = await api.getBlocks();
+            const blocks = data.blocks || [];
+            const total = data.total ?? blocks.length;
+            const contentDiv = document.getElementById('admin-content');
+            contentDiv.innerHTML = `
+                <div class="data-panel">
+                    <div class="data-panel-header">
+                        <span class="data-panel-title">Blocked Users (${total})</span>
+                    </div>
+                    <div class="data-row data-row-header" style="grid-template-columns:2fr 2fr 1fr;">
+                        <div class="data-cell">Blocker</div>
+                        <div class="data-cell">Blocked User</div>
+                        <div class="data-cell">Date</div>
+                    </div>
+                    ${blocks.length > 0 ? blocks.map(b => {
+                        const blocker = [b.blocker_first_name, b.blocker_last_name].filter(Boolean).join(' ') || b.blocker_email || '—';
+                        const blocked = [b.blocked_first_name, b.blocked_last_name].filter(Boolean).join(' ') || b.blocked_email || '—';
+                        return `
+                            <div class="data-row" style="grid-template-columns:2fr 2fr 1fr;">
+                                <div class="data-cell">${blocker}<br><small style="color:var(--text-secondary);font-size:11px;">${(b.blocker_email || '').replace(/</g, '&lt;')}</small></div>
+                                <div class="data-cell">${blocked}<br><small style="color:var(--text-secondary);font-size:11px;">${(b.blocked_email || '').replace(/</g, '&lt;')}</small></div>
+                                <div class="data-cell" style="font-size:12px;color:var(--text-secondary);">${formatDate(b.created_at)}</div>
+                            </div>
+                        `;
+                    }).join('') : `
+                        <div class="data-row" style="grid-template-columns:1fr;padding:24px;text-align:center;color:var(--text-secondary);">No blocks found.</div>
+                    `}
+                </div>
+            `;
+        } catch (error) {
+            this.showError(error.message);
+        }
+    },
+
+    loadSettings() {
+        const contentDiv = document.getElementById('admin-content');
+        const user = api.user || {};
+        contentDiv.innerHTML = `
+            <div class="card" style="margin-bottom:20px;">
+                <div class="card-header"><h3 class="card-title">Admin Profile</h3></div>
+                <div style="padding:20px;">
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" value="${(user.first_name || '')} ${(user.last_name || '').trim()}" readonly style="background:var(--bg-secondary);cursor:not-allowed;">
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" value="${(user.email || '').replace(/"/g, '&quot;')}" readonly style="background:var(--bg-secondary);cursor:not-allowed;">
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:12px;">Change password and 2FA are managed via your account settings.</p>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h3 class="card-title">Platform Settings</h3></div>
+                <div style="padding:20px;">
+                    <p style="font-size:13px;color:var(--text-secondary);">Platform name, support email, and feature flags can be configured in your deployment environment.</p>
+                </div>
+            </div>
+        `;
     },
 
     showError(message) {

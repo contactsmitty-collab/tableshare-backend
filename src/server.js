@@ -17,6 +17,9 @@ const { errorHandler } = require('./middleware/errorHandler');
 const app = express();
 const server = http.createServer(app);
 
+// Required when behind nginx: express-rate-limit needs this to avoid X-Forwarded-For errors
+app.set('trust proxy', 1);
+
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -44,18 +47,23 @@ const allowedOrigins = [
   'http://127.0.0.1:3000',
   'http://127.0.0.1:5173',
 ];
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && req.path.startsWith('/api/')) {
+    console.log(`[CORS] ${req.method} ${req.path} Origin: ${origin} Allowed: ${allowedOrigins.includes(origin)}`);
+  }
+  next();
+});
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow requests with no origin (e.g. Postman, server-to-server) or from allowed list
-    if (!origin || allowedOrigins.includes(origin)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Not allowed by CORS'));
-    }
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, origin);
+    cb(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
 }));
 app.use(express.json());
 app.use(morgan('dev'));
@@ -67,6 +75,11 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     version: '1.0.0',
   });
+});
+
+// CORS test - from admin.tableshare.ai console: fetch('https://tableshare.pixelcheese.com/api/v1/cors-test').then(r=>r.json()).then(console.log)
+app.get('/api/v1/cors-test', (req, res) => {
+  res.json({ ok: true, message: 'CORS working', origin: req.headers.origin });
 });
 
 // Serve static portal files (admin and restaurant portals)

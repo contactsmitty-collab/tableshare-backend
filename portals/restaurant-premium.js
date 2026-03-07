@@ -74,6 +74,7 @@ const RestaurantDashboard = {
             availability: 'Availability',
             analytics: 'Revenue',
             checkins: 'Check-ins',
+            waitlist: 'Waitlist',
             reviews: 'Reviews',
             promotions: 'Promotions',
             rewards: 'Seat at the Table',
@@ -84,6 +85,8 @@ const RestaurantDashboard = {
             dashboard: 'Your TableShare performance at a glance',
             availability: 'Set when you want TableShare to send diners',
             analytics: 'Track incremental revenue from TableShare guests',
+            checkins: 'TableShare guests who checked in',
+            waitlist: 'Manage your virtual queue',
             promotions: 'Create offers to attract more diners',
             rewards: 'Rewards program and dining credits at your venue',
             subscription: 'Manage your partnership tier'
@@ -101,6 +104,7 @@ const RestaurantDashboard = {
             case 'availability': this.loadAvailability(); break;
             case 'analytics': this.loadAnalytics(); break;
             case 'checkins': this.loadCheckins(); break;
+            case 'waitlist': this.loadWaitlist(); break;
             case 'reviews': this.loadReviews(); break;
             case 'promotions': this.loadPromotions(); break;
             case 'rewards': this.loadRewards(); break;
@@ -117,6 +121,18 @@ const RestaurantDashboard = {
                 api.getCheckins(this.restaurantId),
                 api.getRatings(this.restaurantId)
             ]);
+
+            if (restaurant) {
+                if (typeof restaurant.is_accepting_diners === 'boolean') this.availability.enabled = restaurant.is_accepting_diners;
+                if (restaurant.availability_settings && typeof restaurant.availability_settings === 'object') {
+                    const s = restaurant.availability_settings;
+                    if (s.windows && Array.isArray(s.windows)) this.availability.windows = s.windows;
+                    if (s.tableSizes && typeof s.tableSizes === 'object') this.availability.tableSizes = { ...this.availability.tableSizes, ...s.tableSizes };
+                    if (typeof s.maxCovers === 'number') this.availability.maxCovers = s.maxCovers;
+                    if (typeof s.autoAccept === 'boolean') this.availability.autoAccept = s.autoAccept;
+                }
+                localStorage.setItem('ts_availability', JSON.stringify(this.availability));
+            }
 
             const contentDiv = document.getElementById('restaurant-content');
 
@@ -345,8 +361,20 @@ const RestaurantDashboard = {
                             <div class="form-group"><label>Phone</label><input type="tel" id="prof-phone" value="${restaurant.phone || ''}"></div>
                             <div class="form-group"><label>Website</label><input type="url" id="prof-website" value="${restaurant.website || ''}" placeholder="https://"></div>
                         </div>
-                        <div class="form-group"><label>Description</label><textarea id="prof-description" rows="3">${restaurant.description || ''}</textarea></div>
-                        <div class="form-group"><label>Hours of Operation</label><input type="text" id="prof-hours" value="${restaurant.hours || ''}" placeholder="e.g. Mon-Sun: 11am-10pm"></div>
+                        <div class="form-group"><label>Description</label><textarea id="prof-description" rows="3">${(restaurant.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea></div>
+                        <div class="form-group">
+                            <label>Noise Level</label>
+                            <select id="prof-noise">
+                                <option value="">Select</option>
+                                <option value="quiet" ${restaurant.noise_level === 'quiet' ? 'selected' : ''}>Quiet</option>
+                                <option value="moderate" ${restaurant.noise_level === 'moderate' ? 'selected' : ''}>Moderate</option>
+                                <option value="lively" ${restaurant.noise_level === 'lively' ? 'selected' : ''}>Lively</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label>TableShare Offer</label><textarea id="prof-tableshare-offer" rows="2" placeholder="e.g. Free appetizer for TableShare diners">${(restaurant.tableshare_offer || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea></div>
+                        <div class="form-group"><label>Menu URL</label><input type="url" id="prof-menu-url" value="${(restaurant.menu_url || '').replace(/"/g, '&quot;')}" placeholder="https://"></div>
+                        <div class="form-group"><label>Specials</label><textarea id="prof-specials" rows="2" placeholder="Current specials or promotions">${(restaurant.specials || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea></div>
+                        <div class="form-group"><label>Hours of Operation</label><input type="text" id="prof-hours" value="${(restaurant.hours || '').replace(/"/g, '&quot;')}" placeholder="e.g. Mon-Sun: 11am-10pm"></div>
                         <button type="submit" class="btn btn-primary" style="margin-top:12px;">Save Changes</button>
                     </form>
                 </div>
@@ -357,13 +385,18 @@ const RestaurantDashboard = {
                 try {
                     await api.updateRestaurant(this.restaurantId, {
                         name: document.getElementById('prof-name').value,
-                        cuisine: document.getElementById('prof-cuisine').value || null,
+                        city: document.getElementById('prof-city').value || null,
+                        cuisine_type: document.getElementById('prof-cuisine').value || null,
                         address: document.getElementById('prof-address').value || null,
                         price_range: document.getElementById('prof-price').value || null,
                         phone: document.getElementById('prof-phone').value || null,
                         website: document.getElementById('prof-website').value || null,
                         description: document.getElementById('prof-description').value || null,
                         hours: document.getElementById('prof-hours').value || null,
+                        noise_level: document.getElementById('prof-noise').value || null,
+                        tableshare_offer: document.getElementById('prof-tableshare-offer').value || null,
+                        menu_url: document.getElementById('prof-menu-url').value || null,
+                        specials: document.getElementById('prof-specials').value || null,
                     });
                     showToast('Profile updated!', 'success');
                 } catch (error) { showToast('Error: ' + error.message, 'error'); }
@@ -371,7 +404,21 @@ const RestaurantDashboard = {
         } catch (error) { this.showError(error.message); }
     },
 
-    loadAvailability() {
+    async loadAvailability() {
+        try {
+            if (this.restaurantId) {
+                const restaurant = await api.getRestaurant(this.restaurantId);
+                if (restaurant && restaurant.availability_settings && typeof restaurant.availability_settings === 'object') {
+                    const s = restaurant.availability_settings;
+                    if (s.windows && Array.isArray(s.windows)) this.availability.windows = s.windows;
+                    if (s.tableSizes && typeof s.tableSizes === 'object') this.availability.tableSizes = { ...this.availability.tableSizes, ...s.tableSizes };
+                    if (typeof s.maxCovers === 'number') this.availability.maxCovers = s.maxCovers;
+                    if (typeof s.autoAccept === 'boolean') this.availability.autoAccept = s.autoAccept;
+                    if (typeof restaurant.is_accepting_diners === 'boolean') this.availability.enabled = restaurant.is_accepting_diners;
+                    localStorage.setItem('ts_availability', JSON.stringify(this.availability));
+                }
+            }
+        } catch (e) { console.warn('Could not load availability from API:', e); }
         const contentDiv = document.getElementById('restaurant-content');
         const a = this.availability;
 
@@ -473,7 +520,7 @@ const RestaurantDashboard = {
         });
     },
 
-    saveAvailability() {
+    async saveAvailability() {
         document.querySelectorAll('.avail-start').forEach(sel => {
             const i = parseInt(sel.dataset.index);
             this.availability.windows[i].start = sel.value;
@@ -493,8 +540,14 @@ const RestaurantDashboard = {
         const masterEl = document.getElementById('avail-master-toggle');
         if (masterEl) this.availability.enabled = masterEl.checked;
 
-        localStorage.setItem('ts_availability', JSON.stringify(this.availability));
-        showToast('Availability settings saved!', 'success');
+        const toSave = { windows: this.availability.windows, tableSizes: this.availability.tableSizes, maxCovers: this.availability.maxCovers, autoAccept: this.availability.autoAccept };
+        try {
+            await api.updateRestaurant(this.restaurantId, { availability_settings: toSave, is_accepting_diners: this.availability.enabled });
+            localStorage.setItem('ts_availability', JSON.stringify(this.availability));
+            showToast('Availability settings saved!', 'success');
+        } catch (error) {
+            showToast('Error: ' + error.message, 'error');
+        }
     },
 
     async loadAnalytics() {
@@ -569,12 +622,26 @@ const RestaurantDashboard = {
             `;
 
             setTimeout(() => {
-                const labels = ChartUtils.getDateLabels(30);
+                const byDay = {};
+                checkins.forEach(c => {
+                    const d = new Date(c.check_in_time).toISOString().slice(0, 10);
+                    byDay[d] = (byDay[d] || 0) + (c.party_size || 1);
+                });
+                const labels = [];
+                const revenueData = [];
+                for (let i = 29; i >= 0; i--) {
+                    const d = new Date();
+                    d.setDate(d.getDate() - i);
+                    const dayStr = d.toISOString().slice(0, 10);
+                    labels.push(dayStr);
+                    const covers = byDay[dayStr] || 0;
+                    revenueData.push(covers * avgSpend);
+                }
                 ChartUtils.createLineChart('revenue-chart', {
                     labels,
                     datasets: [{
                         label: 'Revenue ($)',
-                        data: ChartUtils.generateTrendData(30, 0, avgSpend * 3),
+                        data: revenueData,
                         borderColor: '#0D9F6E',
                         backgroundColor: 'rgba(13,159,110,0.08)',
                         tension: 0.4,
@@ -588,7 +655,7 @@ const RestaurantDashboard = {
                     labels: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
                     datasets: [{
                         label: 'Covers',
-                        data: dowData.every(v => v === 0) ? [5, 8, 7, 9, 3, 2, 1] : dowData,
+                        data: dowData,
                         backgroundColor: '#E8553D',
                         borderRadius: 6
                     }]
@@ -646,6 +713,59 @@ const RestaurantDashboard = {
                         `).join('')}
                         </div>
                     ` : '<div class="empty-state"><div class="empty-state-icon">📍</div><h3>No Check-ins Yet</h3><p style="font-size:13px;">TableShare guests will appear here.</p></div>'}
+                </div>
+            `;
+        } catch (error) { this.showError(error.message); }
+    },
+
+    async loadWaitlist() {
+        try {
+            if (!this.restaurantId) { this.showError('No restaurant associated'); return; }
+            const waitlist = await api.getWaitlist(this.restaurantId);
+            const contentDiv = document.getElementById('restaurant-content');
+            const waiting = waitlist.filter(w => w.status === 'waiting');
+            const notified = waitlist.filter(w => w.status === 'notified');
+            contentDiv.innerHTML = `
+                <div class="kpi-grid" style="margin-bottom:24px;">
+                    <div class="kpi-card">
+                        <div class="kpi-label">In Queue</div>
+                        <div class="kpi-value" style="font-family:var(--mono);">${waiting.length}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Notified</div>
+                        <div class="kpi-value" style="font-family:var(--mono);">${notified.length}</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Total Active</div>
+                        <div class="kpi-value" style="font-family:var(--mono);">${waitlist.length}</div>
+                    </div>
+                </div>
+                <div class="data-panel">
+                    <div class="data-panel-header">
+                        <span class="data-panel-title">Virtual Queue</span>
+                        <button class="btn btn-secondary btn-sm" onclick="RestaurantDashboard.loadWaitlist()">Refresh</button>
+                    </div>
+                    ${waitlist.length > 0 ? `
+                        <div class="data-row data-row-header" style="grid-template-columns:60px 2fr 80px 1fr 100px;">
+                            <div class="data-cell">#</div>
+                            <div class="data-cell">Guest</div>
+                            <div class="data-cell">Party</div>
+                            <div class="data-cell">Joined</div>
+                            <div class="data-cell">Status</div>
+                        </div>
+                        ${waitlist.map((w, i) => `
+                            <div class="data-row" style="grid-template-columns:60px 2fr 80px 1fr 100px;">
+                                <div class="data-cell mono bold">${w.position ?? w.queue_position ?? (i + 1)}</div>
+                                <div class="data-cell">
+                                    <div style="font-weight:600;">${(w.first_name || '')} ${(w.last_name || '')}</div>
+                                    <div style="font-size:12px;color:var(--text-secondary);">${w.email || ''}</div>
+                                </div>
+                                <div class="data-cell mono">${w.party_size || 1}</div>
+                                <div class="data-cell" style="font-size:12px;color:var(--text-secondary);">${formatDateTime(w.joined_at)}</div>
+                                <div class="data-cell"><span class="badge ${w.status === 'notified' ? 'badge-active' : 'badge-warning'}">${w.status === 'notified' ? 'Ready' : 'Waiting'}</span></div>
+                            </div>
+                        `).join('')}
+                    ` : '<div class="empty-state"><div class="empty-state-icon">📋</div><h3>No one on the waitlist</h3><p style="font-size:13px;">Guests who join your virtual queue will appear here.</p></div>'}
                 </div>
             `;
         } catch (error) { this.showError(error.message); }
@@ -739,7 +859,10 @@ const RestaurantDashboard = {
         `;
     },
 
-    loadPromotions() {
+    async loadPromotions() {
+        try {
+            if (this.restaurantId) this.promotions = await api.getPromotions(this.restaurantId);
+        } catch (e) { console.warn('Could not load promotions:', e); this.promotions = this.promotions || []; }
         const contentDiv = document.getElementById('restaurant-content');
         const tier = this.subscription.tier;
         const canCreate = tier === 'preferred' || tier === 'premium';
@@ -758,17 +881,17 @@ const RestaurantDashboard = {
                     <span class="data-panel-title">Promotions (${this.promotions.filter(p => p.active).length} active)</span>
                     <button class="btn btn-primary btn-sm" onclick="RestaurantDashboard.showCreatePromoModal()" ${canCreate ? '' : 'disabled'}>+ Create</button>
                 </div>
-                ${this.promotions.length > 0 ? this.promotions.map((p, i) => `
+                ${this.promotions.length > 0 ? this.promotions.map((p) => `
                     <div class="data-row" style="grid-template-columns:1fr 100px 120px;">
                         <div class="data-cell">
-                            <div style="font-weight:600;font-size:13px;">${p.title}</div>
-                            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${p.description}</div>
-                            <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;">${p.days} · ${p.timeRange}</div>
+                            <div style="font-weight:600;font-size:13px;">${(p.title || '').replace(/</g, '&lt;')}</div>
+                            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${(p.description || '').replace(/</g, '&lt;')}</div>
+                            <div style="font-size:11px;color:var(--text-tertiary);margin-top:2px;">${(p.days || '')} · ${(p.timeRange || p.time_range || '')}</div>
                         </div>
                         <div class="data-cell"><span class="badge ${p.active ? 'badge-active' : 'badge-inactive'}">${p.active ? 'Active' : 'Paused'}</span></div>
                         <div class="data-cell" style="display:flex;gap:6px;justify-content:flex-end;">
-                            <button class="btn btn-sm ${p.active ? 'btn-secondary' : 'btn-success'}" onclick="RestaurantDashboard.togglePromo(${i})">${p.active ? 'Pause' : 'Activate'}</button>
-                            <button class="btn btn-sm btn-danger" onclick="RestaurantDashboard.deletePromo(${i})">Delete</button>
+                            <button class="btn btn-sm ${p.active ? 'btn-secondary' : 'btn-success'}" onclick="RestaurantDashboard.togglePromo('${p.id}')">${p.active ? 'Pause' : 'Activate'}</button>
+                            <button class="btn btn-sm btn-danger" onclick="RestaurantDashboard.deletePromo('${p.id}')">Delete</button>
                         </div>
                     </div>
                 `).join('') : `
@@ -827,7 +950,7 @@ const RestaurantDashboard = {
             </form>
         `);
 
-        document.getElementById('create-promo-form').addEventListener('submit', (e) => {
+        document.getElementById('create-promo-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const title = document.getElementById('promo-title').value;
             const description = document.getElementById('promo-desc').value;
@@ -835,35 +958,44 @@ const RestaurantDashboard = {
             const start = document.getElementById('promo-start').value;
             const end = document.getElementById('promo-end').value;
 
-            this.promotions.push({
-                id: generateId(),
-                title,
-                description,
-                days: checkedDays.join(', '),
-                timeRange: `${start} - ${end}`,
-                active: true,
-                created: new Date().toISOString()
-            });
-
-            localStorage.setItem('ts_promotions', JSON.stringify(this.promotions));
-            closeModal();
-            showToast('Promotion created!', 'success');
-            this.loadPromotions();
+            try {
+                await api.createPromotion(this.restaurantId, {
+                    title,
+                    description,
+                    days: checkedDays.join(', '),
+                    timeRange: `${start} - ${end}`
+                });
+                closeModal();
+                showToast('Promotion created!', 'success');
+                this.loadPromotions();
+            } catch (err) {
+                showToast('Error: ' + err.message, 'error');
+            }
         });
     },
 
-    togglePromo(index) {
-        this.promotions[index].active = !this.promotions[index].active;
-        localStorage.setItem('ts_promotions', JSON.stringify(this.promotions));
-        this.loadPromotions();
-        showToast(this.promotions[index].active ? 'Promotion activated!' : 'Promotion paused', 'info');
+    async togglePromo(promoId) {
+        const p = this.promotions.find(x => String(x.id) === String(promoId));
+        if (!p) return;
+        try {
+            await api.updatePromotion(this.restaurantId, promoId, { active: !p.active });
+            p.active = !p.active;
+            this.loadPromotions();
+            showToast(p.active ? 'Promotion activated!' : 'Promotion paused', 'info');
+        } catch (err) {
+            showToast('Error: ' + err.message, 'error');
+        }
     },
 
-    deletePromo(index) {
-        this.promotions.splice(index, 1);
-        localStorage.setItem('ts_promotions', JSON.stringify(this.promotions));
-        this.loadPromotions();
-        showToast('Promotion deleted', 'success');
+    async deletePromo(promoId) {
+        try {
+            await api.deletePromotion(this.restaurantId, promoId);
+            this.promotions = this.promotions.filter(p => String(p.id) !== String(promoId));
+            this.loadPromotions();
+            showToast('Promotion deleted', 'success');
+        } catch (err) {
+            showToast('Error: ' + err.message, 'error');
+        }
     },
 
     loadSubscription() {

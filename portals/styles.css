@@ -730,14 +730,28 @@ tbody tr:last-child td { border-bottom: none; }
     box-shadow: 0 8px 24px rgba(0,0,0,0.2);
 }
 
-/* ─── Responsive ─── */
+/* ─── Responsive (Phase 5: Mobile polish) ─── */
 @media (max-width: 768px) {
     .sidebar { width: 100%; height: auto; position: relative; border-right: none; border-bottom: 1px solid var(--border); padding: 16px 0; }
+    .sidebar .nav-menu { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; padding: 0 12px; }
+    .sidebar .nav-menu li { flex: 1 1 auto; min-width: 100px; }
+    .sidebar .nav-menu a { padding: 10px 12px; font-size: 12px; }
+    .sidebar .nav-icon { display: none; }
     .screen.active { flex-direction: column; }
-    .content-header { padding: 20px; flex-direction: column; align-items: flex-start; gap: 12px; }
-    .content-body { padding: 20px; }
-    .kpi-grid { flex-direction: column; }
+    .content-header { padding: 16px 20px; flex-direction: column; align-items: flex-start; gap: 12px; }
+    .content-body { padding: 16px 20px; }
+    .kpi-grid { grid-template-columns: 1fr; gap: 12px; }
     .hero-card { flex-direction: column; text-align: center; gap: 20px; }
+    .data-row { grid-template-columns: 1fr 1fr !important; font-size: 12px; }
+    .data-row-header .data-cell { font-size: 11px; }
+    .data-panel-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .login-card { padding: 24px; margin: 16px; }
+    .toast { left: 16px; right: 16px; bottom: 16px; }
+}
+@media (max-width: 480px) {
+    .content-header h1 { font-size: 18px; }
+    .btn { padding: 8px 14px; font-size: 12px; }
+    .modal-content { margin: 16px; max-width: calc(100% - 32px); }
 }
 
 /* ─── Utility ─── */
